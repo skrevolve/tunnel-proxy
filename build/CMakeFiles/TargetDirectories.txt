@@ -1,3 +1,0 @@
-/home/skrevolve/tunnel-proxy/build/CMakeFiles/proxy.dir
-/home/skrevolve/tunnel-proxy/build/CMakeFiles/edit_cache.dir
-/home/skrevolve/tunnel-proxy/build/CMakeFiles/rebuild_cache.dir
