@@ -1,0 +1,54 @@
+# 빌드 디렉토리
+build/
+cmake-build-*/
+
+# 실행 파일
+proxy
+*.out
+
+# 객체 파일
+*.o
+*.obj
+
+# 라이브러리
+*.a
+*.so
+*.dylib
+*.lib
+*.dll
+
+# CMake 생성 파일
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# IDE 설정
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 로그 파일
+*.log
+
+# 코어 덤프
+core
+core.*
+
+# 디버그 정보
+*.dSYM/
+
+# OS 파일
+.DS_Store
+Thumbs.db
+
+# 테스트 결과
+Testing/
+test_*.txt
+
+# 임시 파일
+*.tmp
+*.bak

@@ -1,0 +1,8 @@
+{
+  "local_port": 8080,
+  "target_ip": "127.0.0.1",
+  "target_port": 80,
+  "mode": "tcp",
+  "verbose": true,
+  "log_file": "proxy.log"
+}
