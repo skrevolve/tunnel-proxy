@@ -75,6 +75,17 @@ git add .
 git commit -m "feat: 새 기능 추가"
 ```
 
+#### 3-1. 커밋 관련
+```bash
+fix : 버그 수정
+build : 빌드 관련 파일 수정, 모듈 설치 또는 삭제에 대한 커밋
+chore : 그 외 자잘한 수정
+docs : 문서 수정
+test : 테스트 코드 수정
+refactor : 코드 리팩토링에 대한 커밋
+
+```
+
 ### 4. Pull Request
 - `develop` 브랜치로 PR 생성
 - 코드 리뷰 후 머지

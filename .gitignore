@@ -27,6 +27,7 @@ Makefile
 # IDE 설정
 .vscode/
 .idea/
+.github/
 *.swp
 *.swo
 *~
@@ -37,7 +38,7 @@ Makefile
 # 코어 덤프
 core
 core.*
-
+!core/
 # 디버그 정보
 *.dSYM/
 
