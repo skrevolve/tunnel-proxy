@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>      // fcntl, O_NONBLOCK
 #include <unistd.h>
+#include <vector>
 #include <cstring>
 #include <stdexcept>
 #include <cerrno>
@@ -23,22 +24,27 @@ EpollProxy::EpollProxy(int local_port, const std::string& target_ip, int target_
     , total_connections_(0)
     , active_connections_(0)
 {
-    // Phase 2-B에서 구현할 내용:
-    //
-    //   1. epoll_create1(EPOLL_CLOEXEC)
-    //      - epoll 인스턴스를 커널에 생성하고 fd를 반환받는다.
-    //      - EPOLL_CLOEXEC: exec() 계열 호출 시 자식 프로세스에 fd가 누출되지 않도록
-    //        O_CLOEXEC 플래그를 설정한다. close-on-exec의 약자.
-    //
-    //   2. create_listening_socket(local_port)
-    //      - BasicProxy와 동일하지만 set_nonblocking()을 추가로 호출한다.
-    //      - ET 모드에서 블로킹 소켓을 쓰면 accept()나 read()가 무한 대기한다.
-    //
-    //   3. add_to_epoll(listen_fd_, EPOLLIN | EPOLLET)
-    //      - listen_fd_를 epoll에 등록해 새 연결 이벤트를 감지한다.
-    //      - EPOLLIN: 읽기 이벤트 (새 연결 도착 = "읽을 수 있는 상태")
-    //      - EPOLLET: edge-triggered 모드 (상태 변화 시 1번만 이벤트 발생)
-    (void)local_port;
+    // 1. epoll 인스턴스 생성
+    //    EPOLL_CLOEXEC: exec() 계열 호출 시 자식 프로세스에 fd 누출 방지
+    epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd_ < 0) {
+        throw std::runtime_error("epoll_create1: " + std::string(strerror(errno)));
+    }
+
+    // 2. 논블로킹 리스닝 소켓 생성
+    //    ET 모드에서 블로킹 소켓을 쓰면 accept()/read()가 무한 대기
+    try {
+        listen_fd_ = create_listening_socket(local_port);
+    } catch (...) {
+        close(epoll_fd_);
+        epoll_fd_ = -1;
+        throw;
+    }
+
+    // 3. listen_fd를 epoll에 등록해 새 연결 이벤트 감지
+    //    EPOLLIN:  새 연결 도착 (= "읽을 수 있는 상태")
+    //    EPOLLET:  edge-triggered 모드 (상태 변화 시 1번만 이벤트 발생)
+    add_to_epoll(listen_fd_, EPOLLIN | EPOLLET);
 }
 
 EpollProxy::~EpollProxy() {
@@ -52,40 +58,42 @@ EpollProxy::~EpollProxy() {
 // ── 메인 이벤트 루프 ───────────────────────────────────────────────────────────
 
 void EpollProxy::run() {
-    // Phase 2-C에서 구현할 내용:
-    //
-    //   running_ = true;
-    //
-    //   // 이벤트 배열: epoll_wait이 준비된 이벤트를 여기에 채워준다.
-    //   std::vector<epoll_event> events(max_events_);
-    //
-    //   while (running_) {
-    //       // epoll_wait(epoll_fd, 결과배열, 최대개수, 타임아웃ms)
-    //       // 타임아웃 -1: I/O 이벤트가 생길 때까지 무한 대기
-    //       // 타임아웃  0: 즉시 반환 (논블로킹 폴링)
-    //       int n = epoll_wait(epoll_fd_, events.data(), max_events_, -1);
-    //
-    //       if (n < 0) {
-    //           // EINTR: 시그널(SIGINT 등)로 epoll_wait가 중단됨 → 재시도
-    //           if (errno == EINTR) continue;
-    //           break;  // 그 외 에러는 루프 종료
-    //       }
-    //
-    //       for (int i = 0; i < n; i++) {
-    //           int fd = events[i].data.fd;
-    //
-    //           if (fd == listen_fd_) {
-    //               // 새 클라이언트 연결 요청
-    //               accept_connection();
-    //           } else {
-    //               // 기존 연결에서 데이터 수신 또는 에러
-    //               handle_event(fd, events[i].events);
-    //           }
-    //       }
-    //   }
-
     running_ = true;
-    Logger::info("[EpollProxy] run() — Phase 2-B/2-C 구현 예정");
+
+    // 이벤트 배열: epoll_wait이 준비된 이벤트를 여기에 채워준다.
+    // max_events_: 한 번의 epoll_wait 호출에서 반환할 최대 이벤트 수.
+    // 너무 크면 메모리 낭비, 너무 작으면 이벤트가 밀려 지연 발생.
+    std::vector<epoll_event> events(max_events_);
+
+    Logger::info("[EpollProxy] event loop started");
+
+    while (running_) {
+        // epoll_wait(epoll_fd, 결과배열, 최대개수, 타임아웃ms)
+        // 타임아웃 -1: I/O 이벤트가 생길 때까지 무한 대기
+        // 반환값: 준비된 이벤트 수 (0이면 타임아웃, -1이면 에러)
+        int n = epoll_wait(epoll_fd_, events.data(), max_events_, -1);
+
+        if (n < 0) {
+            // EINTR: 시그널(SIGINT 등)로 epoll_wait가 중단됨 → 재시도
+            if (errno == EINTR) continue;
+            Logger::error("[EpollProxy] epoll_wait: " + std::string(strerror(errno)));
+            break;
+        }
+
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+
+            if (fd == listen_fd_) {
+                // 새 클라이언트 연결 요청 (Phase 2-C에서 구현)
+                accept_connection();
+            } else {
+                // 기존 연결에서 데이터 수신 또는 에러 (Phase 2-C에서 구현)
+                handle_event(fd, events[i].events);
+            }
+        }
+    }
+
+    Logger::info("[EpollProxy] event loop stopped");
     running_ = false;
 }
 
@@ -102,64 +110,76 @@ uint64_t EpollProxy::get_active_connections() const { return active_connections_
 // ── 소켓 초기화 (Phase 2-B에서 구현) ──────────────────────────────────────────
 
 int EpollProxy::create_listening_socket(int port) {
-    // BasicProxy::create_listening_socket()과 동일하게 구현하되,
-    // bind/listen 후 set_nonblocking(fd)를 호출해야 한다.
-    //
-    // 논블로킹이 필요한 이유:
-    //   ET 모드에서 accept()가 블로킹이면, 대기 중인 연결이 없을 때
-    //   영원히 블로킹되어 이벤트 루프 전체가 멈춘다.
-    //   논블로킹이면 대기 연결이 없을 때 즉시 EAGAIN을 반환한다.
-    (void)port;
-    return -1;
+    Logger::debug("[EpollProxy] creating listening socket on port " + std::to_string(port));
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::runtime_error("socket: " + std::string(strerror(errno)));
+    }
+
+    int opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        close(fd);
+        throw std::runtime_error("setsockopt(SO_REUSEADDR): " + std::string(strerror(errno)));
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(static_cast<uint16_t>(port));
+
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        throw std::runtime_error("bind: " + std::string(strerror(errno)));
+    }
+
+    if (listen(fd, SOMAXCONN) < 0) {
+        close(fd);
+        throw std::runtime_error("listen: " + std::string(strerror(errno)));
+    }
+
+    // BasicProxy와의 핵심 차이: 논블로킹 설정
+    // ET 모드에서 accept()가 블로킹이면 대기 연결이 없을 때 이벤트 루프 전체가 멈춘다.
+    set_nonblocking(fd);
+
+    return fd;
 }
 
 void EpollProxy::set_nonblocking(int fd) {
-    // fcntl: 파일 디스크립터 제어 (file control)
-    //
-    //   F_GETFL: 현재 파일 상태 플래그를 가져온다
-    //   F_SETFL: 파일 상태 플래그를 설정한다
-    //   O_NONBLOCK: 논블로킹 모드 활성화
-    //
-    // 구현 예시:
-    //   int flags = fcntl(fd, F_GETFL, 0);
-    //   if (flags < 0) throw std::runtime_error(...);
-    //   if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) throw ...;
-    //
-    // 왜 F_GETFL 후 OR를 하는가:
-    //   기존 플래그를 보존하면서 O_NONBLOCK만 추가하기 위해.
-    //   F_SETFL에 O_NONBLOCK만 넘기면 기존 플래그(O_RDWR 등)가 날아간다.
-    (void)fd;
+    // F_GETFL로 현재 플래그를 읽은 뒤 O_NONBLOCK을 OR해서 설정한다.
+    // 기존 플래그(O_RDWR 등)를 보존하면서 논블로킹만 추가하기 위해 OR를 사용한다.
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        throw std::runtime_error("fcntl(F_GETFL): " + std::string(strerror(errno)));
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        throw std::runtime_error("fcntl(F_SETFL, O_NONBLOCK): " + std::string(strerror(errno)));
+    }
 }
 
 // ── epoll 관리 (Phase 2-B에서 구현) ───────────────────────────────────────────
 
 void EpollProxy::add_to_epoll(int fd, uint32_t events) {
-    // epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) 구현
-    //
-    // epoll_event 구조체:
-    //   ev.events  : 감시할 이벤트 플래그 (EPOLLIN, EPOLLET 등)
-    //   ev.data.fd : 이벤트 발생 시 식별용 데이터 (fd 저장)
-    //
-    // 왜 ev.data.fd에 fd를 저장하는가:
-    //   epoll_wait 결과에서 어떤 fd에 이벤트가 발생했는지 알기 위해.
-    //   events[i].data.fd로 접근한다.
-    (void)fd; (void)events;
+    epoll_event ev{};
+    ev.events  = events;
+    ev.data.fd = fd;  // epoll_wait 결과에서 어떤 fd에 이벤트가 발생했는지 식별
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        throw std::runtime_error("epoll_ctl(ADD): " + std::string(strerror(errno)));
+    }
 }
 
 void EpollProxy::mod_epoll(int fd, uint32_t events) {
-    // epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) 구현
-    // 이미 등록된 fd의 관심 이벤트를 변경한다.
-    // 예: 쓰기 버퍼가 가득 찼을 때 EPOLLOUT을 추가
-    (void)fd; (void)events;
+    epoll_event ev{};
+    ev.events  = events;
+    ev.data.fd = fd;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) < 0) {
+        throw std::runtime_error("epoll_ctl(MOD): " + std::string(strerror(errno)));
+    }
 }
 
 void EpollProxy::remove_from_epoll(int fd) {
-    // epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) 구현
-    //
-    // Linux 2.6.9 이전: 마지막 인자에 nullptr을 넘길 수 없어 더미 구조체 필요
-    // Linux 2.6.9 이후: nullptr 사용 가능
-    // nullptr을 사용하면 코드가 간결하다.
-    (void)fd;
+    // Linux 2.6.9 이후: 마지막 인자 nullptr 사용 가능
+    epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 }
 
 // ── 이벤트 처리 (Phase 2-C에서 구현) ──────────────────────────────────────────
