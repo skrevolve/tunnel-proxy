@@ -47,9 +47,9 @@ target_link_libraries(proxy
     nlohmann_json::nlohmann_json
 )
 
-# 테스트 활성화
-enable_testing()
-add_subdirectory(tests)
+# 테스트 — 실제 테스트 작성 시점에 활성화
+# enable_testing()
+# add_subdirectory(tests)
 
 # 빌드 정보 출력
 message(STATUS "========================================")
