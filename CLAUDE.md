@@ -8,25 +8,31 @@ OtoRAS 학습 및 제작:
 
 ---
 
-## 현재 개발 단계
+## 세션 작업 단위 (토큰 절약)
 
-**Phase 1 진행 중** — 기본 TCP 프록시 (멀티스레드)
+**한 세션에 하나의 작업 단위만 처리.**
+세션 시작 시 아래 목록에서 현재 작업 번호를 확인하고 해당 작업만 완료.
 
-미구현 목록 (우선순위 순):
-1. `CMakeLists.txt` — nlohmann/json FetchContent 추가
-2. `Config::load_from_file()` — 실제 JSON 파싱 구현
-3. `BasicProxy::create_listening_socket()` — socket/setsockopt/bind/listen
-4. `BasicProxy::run()` — accept() 루프
-5. `BasicProxy::connect_to_target()` — socket/connect
-6. `BasicProxy::handle_connection()` — 양방향 스레드 생성
-7. `BasicProxy::forward_data()` — read/write 루프
-8. `proxy.h` — BasicProxy와 중복이므로 삭제
-9. `running_` — `std::atomic<bool>`로 변경
+### Phase 1 — 기본 TCP 프록시 (멀티스레드)
 
-Phase 순서:
-- Phase 1: 기본 TCP 프록시 (멀티스레드)
-- Phase 2: epoll 기반 비동기 I/O
-- Phase 3: Zero-copy 최적화 (splice/sendfile)
+| 세션 | 브랜치 | 작업 내용 |
+|------|--------|-----------|
+| 1-A | `feat/cmake-json` | CMakeLists.txt에 nlohmann/json FetchContent 추가 |
+| 1-B | `feat/config-parse` | Config::load_from_file() JSON 실제 파싱 구현 |
+| 1-C | `feat/socket-listen` | BasicProxy::create_listening_socket() + run() accept 루프 |
+| 1-D | `feat/forward-data` | connect_to_target() + handle_connection() + forward_data() |
+| 1-E | `refactor/cleanup` | proxy.h 삭제, running_ → atomic<bool>, 테스트 보강 |
+
+### Phase 2 — epoll 비동기 I/O
+| 세션 | 브랜치 | 작업 내용 |
+|------|--------|-----------|
+| 2-A | `feat/epoll-proxy` | EpollProxy 클래스 skeleton + non-blocking 소켓 |
+| 2-B | `feat/epoll-loop` | epoll_wait 이벤트 루프 구현 |
+| 2-C | `feat/epoll-forward` | edge-triggered 양방향 데이터 포워딩 |
+
+### 이후 Phase (Phase 3~8)
+추후 세션 단위 분리 예정:
+- Phase 3: Zero-copy (splice/sendfile)
 - Phase 4: TLS 암호화 (OpenSSL)
 - Phase 5: UDP 지원
 - Phase 6: 리버스 터널 프로토콜
@@ -35,55 +41,61 @@ Phase 순서:
 
 ---
 
+## 세션 시작 방법
+
+세션 시작 시 아래 순서로 진행:
+
+```
+1. 위 표에서 현재 세션 번호 확인
+2. 해당 브랜치 생성
+3. 작업 내용만 구현
+4. 빌드 확인
+5. PR 생성 후 종료
+```
+
+**해당 세션 범위를 벗어나는 작업은 하지 않음.**
+다음 세션 작업이 보여도 건드리지 않고 TODO 주석만 남김.
+
+---
+
 ## 의존성 규칙
 
 **apt, brew, yum 등 시스템 패키지 매니저 절대 사용 금지.**
 모든 외부 라이브러리는 CMakeLists.txt의 FetchContent로 관리.
-환경(WSL, Ubuntu, Docker, 서버 등)이 바뀌어도 cmake 한 번으로 동일하게 동작해야 함.
+환경(WSL, Ubuntu, Docker, 서버)이 바뀌어도 cmake 한 번으로 동일하게 동작해야 함.
 
-현재 의존성:
-- CMake 3.14+ (FetchContent 안정 버전)
+시스템 의존성 (find_package로만 탐지):
+- CMake 3.14+
 - GCC 11+ (C++17)
-- OpenSSL 3.x (시스템 설치, find_package로 탐지)
-- pthread (시스템)
+- OpenSSL 3.x
+- pthread
 
-FetchContent로 관리하는 라이브러리:
+FetchContent로 관리:
 - nlohmann/json v3.11.3
 
-CMakeLists.txt FetchContent 템플릿:
+FetchContent 추가 방법:
 ```cmake
 include(FetchContent)
-
 FetchContent_Declare(
     nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
     DOWNLOAD_NO_EXTRACT TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
-
-# 또는 헤더온리 단일파일 방식:
-# file(DOWNLOAD
-#     https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
-#     ${CMAKE_SOURCE_DIR}/include/nlohmann/json.hpp
-# )
 ```
 
-새 라이브러리 추가 시 apt 사용하지 말고 위 방식으로 CMakeLists.txt에 추가.
+새 라이브러리 추가 시 apt 절대 사용하지 말고 위 방식으로 CMakeLists.txt에 추가.
 
 ---
 
 ## 빌드 규칙
-
-작업 후 반드시 아래 순서로 실행:
 
 ```bash
 cd build
 cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc)
 ```
 
-빌드 실패 시:
-- 에러 메시지 읽고 원인 파악 후 수정
-- 재빌드로 성공 확인까지 완료
+- 빌드 실패 시 에러 읽고 수정 → 재빌드 확인까지 완료
 - 빌드 실패 상태로 커밋 절대 금지
 
 ---
@@ -94,31 +106,48 @@ cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc)
 cd build && ctest --output-on-failure
 ```
 
-테스트 실패 시 수정 후 재시도. 테스트 실패 상태로 커밋 금지.
+테스트 실패 상태로 커밋 금지.
 
-Phase 1 동작 확인 방법:
+Phase 1 동작 확인:
 ```bash
-# 터미널 1
-nc -l 80
-
-# 터미널 2
-./proxy --config ../config.json
-
-# 터미널 3
-nc localhost 8080
-# → 터미널 1과 3 사이에 데이터 양방향 전달되면 성공
+# 터미널 1: nc -l 80
+# 터미널 2: ./proxy --config ../config.json
+# 터미널 3: nc localhost 8080
+# → 터미널 1↔3 양방향 데이터 전달 확인
 ```
 
 ---
 
-## Git 자동화 규칙
+## Git 워크플로우 (Issue → Branch → PR)
 
-빌드 + 테스트 통과 후 반드시 실행:
+### 1. 이슈 생성
+세션 시작 전 GitHub에 이슈 생성:
+```bash
+gh issue create \
+  --title "[세션번호] 작업내용" \
+  --body "## 작업 내용\n- 구현 항목\n\n## 완료 기준\n- 빌드 성공\n- 테스트 통과" \
+  --label "enhancement"
+```
 
+예시:
+```bash
+gh issue create \
+  --title "[1-C] BasicProxy 소켓 생성 및 accept 루프 구현" \
+  --body "## 작업 내용\n- create_listening_socket() 구현\n- run() accept 루프 구현\n\n## 완료 기준\n- 빌드 성공\n- nc로 연결 테스트 통과" \
+  --label "enhancement"
+```
+
+### 2. 브랜치 생성
+```bash
+git checkout -b feat/socket-listen
+```
+
+### 3. 구현 + 빌드 확인
+
+### 4. 커밋
 ```bash
 git add -A
 git commit -m "<type>(<scope>): <description>"
-git push origin master
 ```
 
 커밋 타입:
@@ -126,16 +155,27 @@ git push origin master
 - `fix`: 버그 수정
 - `perf`: 성능 개선
 - `refactor`: 리팩토링
-- `test`: 테스트 추가/수정
+- `test`: 테스트
 - `docs`: 문서
-- `build`: 빌드 시스템/의존성
+- `build`: 빌드/의존성
 
 커밋 예시:
 - `build(cmake): add nlohmann/json via FetchContent`
 - `feat(config): implement JSON parsing with nlohmann/json`
 - `feat(proxy): implement create_listening_socket with SO_REUSEADDR`
 - `feat(proxy): implement forward_data bidirectional tunnel`
-- `refactor(proxy): change running_ to std::atomic<bool>`
+
+### 5. PR 생성 후 master 머지
+```bash
+git push origin feat/socket-listen
+
+gh pr create \
+  --title "[1-C] BasicProxy 소켓 생성 및 accept 루프 구현" \
+  --body "closes #<이슈번호>\n\n## 변경 사항\n- create_listening_socket() 구현\n- run() accept 루프 구현\n\n## 테스트\n- 빌드 성공\n- nc 양방향 통신 확인" \
+  --base master
+
+gh pr merge --squash --delete-branch
+```
 
 ---
 
@@ -152,11 +192,11 @@ git push origin master
 **메모리**:
 - `new`/`delete` 직접 사용 금지
 - `std::unique_ptr`, `std::shared_ptr` 사용
-- RAII 패턴 준수 (소켓 fd도 RAII로 감싸기)
+- RAII 패턴 준수 (소켓 fd도 RAII 래퍼로 관리)
 
 **네트워크**:
 - 모든 시스템 콜 리턴값 반드시 체크 (`errno` 확인)
-- 소켓 close 누락 금지 — RAII 래퍼 또는 finally 패턴 사용
+- 소켓 close 누락 금지
 - Phase 2부터 non-blocking + edge-triggered epoll 기본
 
 **에러 처리**:
@@ -166,8 +206,7 @@ if (fd < 0) {
 }
 ```
 
-**헤더 가드**: `#pragma once` 사용
-
+**헤더 가드**: `#pragma once`
 **네임스페이스**: 모든 코드는 `namespace proxy {}` 안에
 
 ---
