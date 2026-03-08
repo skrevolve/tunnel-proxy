@@ -136,38 +136,54 @@ OtoRAS라는 제품의 VPN/원격접속 기술을 학습하고 직접 구현하�
 
 ## Git 워크플로우 (커밋별 PR)
 
-커밋마다 feature 브랜치 → PR → merge. 이슈는 생성하지 않음.
+커밋마다 feature 브랜치 → PR 생성까지 Claude가 담당.
+**PR 머지는 반드시 사람이 직접 한다.**
 
-### 1. 브랜치 생성
+### 1. 테스트 시나리오 정의 (사람)
+
+구현 전에 "내가 확인하고 싶은 것"을 먼저 말한다.
+Claude가 테스트 코드를 작성하면 코드를 읽고 "이게 내가 원하는 검증인가" 확인.
+납득되면 구현 진행. 아니면 수정 요청.
+
+### 2. 브랜치 생성 (Claude)
 
 ```bash
 git checkout -b <type>/<scope>
 # 예: feat/epoll-init, fix/accept-loop
 ```
 
-### 2. 구현 + 빌드 확인
+### 3. 테스트 작성 → 구현 → 빌드 확인 (Claude)
 
 ```bash
 cd build && cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc)
+ctest --output-on-failure
 ```
 
-### 3. 커밋
+### 4. 커밋 + PR 생성 (Claude)
 
 ```bash
 git add <파일>
 git commit -m "<type>(<scope>): <description>"
+git push origin <브랜치명>
+gh pr create --title "<커밋 제목>" --body "..." --base master
+# 여기서 Claude 작업 종료. 머지는 하지 않는다.
 ```
 
 커밋 타입: `feat` / `fix` / `perf` / `refactor` / `test` / `docs` / `build`
 
-### 4. PR 생성 및 머지
+### 5. PR 검토 + 머지 (사람)
 
-```bash
-git push origin <브랜치명>
-gh pr create --title "<커밋 제목>" --body "..." --base master
-gh pr merge --squash --delete-branch
-git checkout master && git pull origin master
+GitHub에서 PR을 열고 아래 항목을 직접 확인한다.
+
 ```
+[ ] 핵심 구현 결정 표 — 왜 이렇게 짰는가 납득되는가
+[ ] 테스트 코드 — 내가 요청한 시나리오가 실제로 검증되고 있는가
+[ ] 빌드 및 테스트 결과 — 모두 통과했는가
+[ ] 직접 동작 확인 — nc/curl 등으로 실제로 동작하는가
+```
+
+납득되면 GitHub에서 직접 **Squash and merge**.
+의문이 있으면 PR에 댓글로 질문 → Claude 답변 → 재확인.
 
 PR 본문 필수 항목 — 처음 보는 사람도 코드를 읽지 않고 PR만으로 완전히 이해할 수 있을 정도로 상세하게 작성.
 
