@@ -59,61 +59,54 @@ Phase 1이 완성되어야 이후 epoll, TLS, 리버스 터널로 발전 가능.
 
 ---
 
-## Git 워크플로우 (Issue → Branch → PR → Merge)
+## Git 워크플로우 (커밋별 PR)
 
-세션마다 반드시 아래 순서로 진행.
+커밋마다 feature 브랜치 → PR → merge. 이슈는 생성하지 않음.
 
-### 1. 이슈 생성
-
-```bash
-gh issue create --title "[세션번호] 작업 제목" --body "..." --label "enhancement"
-```
-
-이슈 본문에 반드시 포함할 내용:
-- **작업 내용**: 이번 세션에서 구현할 항목 목록
-- **왜 필요한가**: 이 작업이 전체 흐름에서 왜 필요한지, 없으면 무엇이 안 되는지
-- **완료 기준**: 빌드 성공 여부, 테스트 통과 여부, 동작 확인 방법
-
-### 2. 브랜치 생성
+### 1. 브랜치 생성
 
 ```bash
-git checkout -b <브랜치명>
+git checkout -b <type>/<scope>
+# 예: feat/epoll-init, fix/accept-loop
 ```
 
-### 3. 구현 + 빌드 확인
+### 2. 구현 + 빌드 확인
 
 ```bash
 cd build && cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc)
 ```
 
-### 4. 테스트
+### 3. 커밋
 
 ```bash
-cd build && ctest --output-on-failure
-```
-
-### 5. 커밋
-
-```bash
-git add -A
+git add <파일>
 git commit -m "<type>(<scope>): <description>"
 ```
 
 커밋 타입: `feat` / `fix` / `perf` / `refactor` / `test` / `docs` / `build`
 
-### 6. PR 생성 및 머지
+### 4. PR 생성 및 머지
 
 ```bash
 git push origin <브랜치명>
-gh pr create --title "[세션번호] 작업 제목" --body "..." --base master
+gh pr create --title "<커밋 제목>" --body "$(cat <<'EOF'
+## 변경 사항
+- 항목1
+- 항목2
+
+## 빌드
+\`\`\`
+[100%] Built target proxy
+\`\`\`
+EOF
+)" --base master
 gh pr merge --squash --delete-branch
+git checkout master && git pull origin master
 ```
 
-PR 본문에 반드시 포함할 내용:
-- **closes #이슈번호**
-- **변경 사항**: 실제로 구현한 항목 목록
-- **왜 이렇게 구현했는가**: 설계 결정이 있었다면 이유 기록 (다음 세션에서 참고용)
-- **테스트**: 빌드 성공 확인, 동작 확인 방법 및 결과
+PR 본문 필수 항목:
+- **변경 사항**: 구현한 항목 목록
+- **빌드**: 성공 출력 결과
 
 ---
 
