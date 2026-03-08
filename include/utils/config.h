@@ -3,31 +3,72 @@
 #include <string>
 
 /**
- * 설정 파일 파서
- * 
- * 신입 작업:
- * - JSON 파일에서 설정 읽기
- * - 설정 값 검증
+ * @file config.h
+ * @brief JSON 설정 파일 파서
+ *
+ * config.json 예시:
+ * @code
+ * {
+ *   "local_port":  8080,        // 프록시가 리스닝할 포트
+ *   "target_ip":   "127.0.0.1", // 트래픽을 전달할 대상 서버 IP
+ *   "target_port": 8000,        // 트래픽을 전달할 대상 서버 포트
+ *   "mode":        "tcp",       // 프로토콜 모드 (현재 tcp만 지원)
+ *   "verbose":     true,        // true면 DEBUG 레벨까지 출력
+ *   "log_file":    "proxy.log"  // 로그 파일 경로 (빈 문자열이면 파일 출력 안 함)
+ * }
+ * @endcode
+ *
+ * 설계 결정:
+ *   - 정적 팩토리 메서드(load_from_file)를 쓰는 이유:
+ *     생성자에서 파일 I/O와 파싱 실패가 생기면 예외를 던져야 하는데,
+ *     생성자 예외는 처리하기 불편하다. 정적 팩토리는 실패 시 명확하게
+ *     예외를 던지고, 성공 시 완전히 초기화된 객체를 반환한다.
+ *
+ *   - 멤버 변수에 직접 접근하지 않고 getter를 쓰는 이유:
+ *     나중에 값 검증 로직(포트 범위 확인 등)을 getter 안에 추가하거나,
+ *     내부 표현을 바꾸더라도 외부 코드를 수정하지 않아도 된다.
  */
 class Config {
 public:
-    // 설정 파일 로드
+    /**
+     * JSON 파일에서 설정을 읽어 Config 객체를 생성한다.
+     *
+     * @param path 설정 파일 경로 (절대경로 또는 실행 디렉토리 기준 상대경로)
+     * @return 파싱된 Config 객체
+     * @throws std::runtime_error 파일을 열 수 없거나 JSON 형식이 잘못된 경우
+     * @throws nlohmann::json::out_of_range 필수 필드(local_port 등)가 없는 경우
+     */
     static Config load_from_file(const std::string& path);
-    
-    // Getter 메서드
+
+    // ── Getter ────────────────────────────────────────────────────────────────
+
+    /** 프록시가 클라이언트 연결을 기다리는 로컬 포트 */
     int get_local_port() const { return local_port_; }
+
+    /** 트래픽을 전달할 대상 서버 IP 주소 */
     std::string get_target_ip() const { return target_ip_; }
+
+    /** 트래픽을 전달할 대상 서버 포트 */
     int get_target_port() const { return target_port_; }
+
+    /** 프로토콜 모드. 현재 "tcp"만 지원, Phase 5에서 "udp" 추가 예정 */
     std::string get_mode() const { return mode_; }
+
+    /** true면 Logger 레벨을 DEBUG로 설정해 상세 로그를 출력한다 */
     bool is_verbose() const { return verbose_; }
+
+    /** 로그를 기록할 파일 경로. 빈 문자열이면 콘솔에만 출력 */
     std::string get_log_file() const { return log_file_; }
 
 private:
-    // TODO: 설정 값들
-    int local_port_;
-    std::string target_ip_;
-    int target_port_;
-    std::string mode_;  // "tcp" or "udp"
-    bool verbose_;
-    std::string log_file_;
+    // Config 객체는 load_from_file()로만 생성 가능하도록
+    // 기본 생성자를 private으로 유지한다.
+    Config() = default;
+
+    int         local_port_;   // 필수 필드 — 없으면 예외 발생
+    std::string target_ip_;    // 필수 필드 — 없으면 예외 발생
+    int         target_port_;  // 필수 필드 — 없으면 예외 발생
+    std::string mode_;         // 선택 필드 — 기본값 "tcp"
+    bool        verbose_;      // 선택 필드 — 기본값 false
+    std::string log_file_;     // 선택 필드 — 기본값 "" (파일 출력 없음)
 };
