@@ -17,8 +17,10 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 # OpenSSL 찾기 (Phase 4에서 사용)
 find_package(OpenSSL REQUIRED)
 
-# nlohmann/json FetchContent
+# 외부 라이브러리 (FetchContent)
 include(FetchContent)
+
+# nlohmann/json v3.11.3
 FetchContent_Declare(
     nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
@@ -26,6 +28,15 @@ FetchContent_Declare(
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
+
+# Google Test v1.14.0
+FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
 
 # 소스 파일 목록
 set(SOURCES
@@ -47,9 +58,9 @@ target_link_libraries(proxy
     nlohmann_json::nlohmann_json
 )
 
-# 테스트 — 실제 테스트 작성 시점에 활성화
-# enable_testing()
-# add_subdirectory(tests)
+# 테스트
+enable_testing()
+add_subdirectory(tests)
 
 # 빌드 정보 출력
 message(STATUS "========================================")
