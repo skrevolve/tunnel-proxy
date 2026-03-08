@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.14)
 project(TunnelProxy VERSION 0.1.0 LANGUAGES CXX)
 
 # C++17 설정
@@ -17,6 +17,16 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 # OpenSSL 찾기 (Phase 4에서 사용)
 find_package(OpenSSL REQUIRED)
 
+# nlohmann/json FetchContent
+include(FetchContent)
+FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # 소스 파일 목록
 set(SOURCES
     src/main.cpp
@@ -29,10 +39,11 @@ set(SOURCES
 add_executable(proxy ${SOURCES})
 
 # 라이브러리 링크
-target_link_libraries(proxy 
+target_link_libraries(proxy
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
+    nlohmann_json::nlohmann_json
 )
 
 # 테스트 활성화

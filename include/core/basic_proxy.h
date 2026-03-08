@@ -80,7 +80,7 @@ private:
     int listen_fd_;                          // 로컬 리스닝 소켓
     std::string target_ip_;                  // 타겟 서버 IP
     int target_port_;                        // 타겟 서버 포트
-    bool running_;                           // 실행 상태 플래그
+    std::atomic<bool> running_;              // 실행 상태 플래그
     std::atomic<uint64_t> total_connections_; // 누적 연결 수
     std::atomic<uint64_t> active_connections_; // 현재 활성 연결 수
 };
