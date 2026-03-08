@@ -15,10 +15,10 @@ OtoRAS라는 제품의 VPN/원격접속 기술을 학습하고 직접 구현하�
 
 ## 현재 개발 단계
 
-**Phase 1 진행 중** — 기본 TCP 프록시 (멀티스레드)
+**Phase 2 진행 중** — epoll 비동기 I/O
 
-코드는 skeleton만 있고 핵심 함수들이 전부 미구현 상태.
-Phase 1이 완성되어야 이후 epoll, TLS, 리버스 터널로 발전 가능.
+- [x] Phase 1 — 기본 TCP 프록시 (멀티스레드) **완료**
+- [ ] Phase 2 — epoll 비동기 I/O (2-A 완료, 2-B 진행 예정)
 
 ---
 
@@ -46,16 +46,91 @@ Phase 1이 완성되어야 이후 epoll, TLS, 리버스 터널로 발전 가능.
 | 2-B | `feat/epoll-loop` | epoll_wait 이벤트 루프 구현 | 이벤트 기반으로 I/O 준비된 fd만 처리. 리버스 터널에서 대량 연결을 유지하는 데 필수 |
 | 2-C | `feat/epoll-forward` | edge-triggered 양방향 데이터 포워딩 | ET 모드는 LT보다 시스템 콜 횟수가 적어 성능 우위. Zero-copy 최적화(Phase 3)의 전제 조건 |
 
-### Phase 3~8 (추후 세션 단위 분리 예정)
+### Phase 3 — Zero-copy 최적화 (splice/sendfile)
 
-| Phase | 작업 | 왜 필요한가 |
-|-------|------|-------------|
-| Phase 3 | Zero-copy (splice/sendfile) | 커널-유저스페이스 메모리 복사 제거. 대용량 데이터 터널링 성능 향상 |
-| Phase 4 | TLS 암호화 (OpenSSL) | Zero Trust의 기반. 터널 내 데이터를 암호화하고 인증서로 신원 확인 |
-| Phase 5 | UDP 지원 | VPN 트래픽의 상당수가 UDP. 게임/영상통화 등 지연 민감한 트래픽 처리 |
-| Phase 6 | 리버스 터널 프로토콜 | OtoRAS 핵심. 클라이언트가 먼저 서버에 연결해두면 서버가 그 터널로 요청을 역방향 전달 |
-| Phase 7 | Zero Trust 인증 (mTLS/JWT) | 터널 접근 자체를 인증. 네트워크 레벨 신뢰 없이 앱/사용자 단위로 접근 제어 |
-| Phase 8 | Guacamole 프로토콜 연동 | 서버에서 RDP/VNC/SSH 세션을 렌더링해서 브라우저로 스트리밍. 클라이언트에 별도 앱 불필요 |
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 3-A | `perf/splice-forward` | splice() 기반 forward_data 구현 | read→write 방식은 커널→유저→커널 메모리 복사 2회 발생. splice는 커널 내부에서 파이프를 통해 복사 없이 전달해 CPU 사용량 절감 |
+| 3-B | `perf/pipe-buffer` | pipe 버퍼 풀 관리 + SPLICE_F_MOVE 최적화 | splice는 중간에 pipe fd가 필요. 연결마다 pipe를 생성/소멸하면 오히려 오버헤드. 풀로 재사용해야 실질적 성능 이득 |
+| 3-C | `test/zero-copy-bench` | EpollProxy 대비 처리량 측정 + 테스트 | 최적화 효과를 수치로 확인. 대용량 전송 시 CPU 사용률 비교 |
+
+### Phase 4 — TLS 암호화 (OpenSSL)
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 4-A | `feat/tls-context` | SSL_CTX 초기화 + 인증서/키 로딩 + gen_cert.sh 정비 | TLS의 기반. 인증서 없이는 암호화도 신원 확인도 불가 |
+| 4-B | `feat/tls-handshake` | SSL_accept / SSL_connect 핸드셰이크 구현 | 실제 암호화 채널 수립. 핸드셰이크 실패 시 연결 차단 |
+| 4-C | `feat/tls-forward` | SSL_read / SSL_write 기반 포워딩 | 일반 read/write를 SSL 버전으로 교체. 논블로킹 + WANT_READ/WANT_WRITE 처리 필요 |
+| 4-D | `test/tls-verify` | 인증서 검증 테스트 (유효/만료/자체서명) | TLS가 실제로 잘못된 인증서를 거부하는지 확인 |
+
+### Phase 5 — UDP 지원
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 5-A | `feat/udp-proxy` | UdpProxy 헤더 설계 + recvfrom/sendto 기반 구현 | VPN 트래픽의 상당수가 UDP. TCP 전용이면 게임/영상통화 등 지연 민감한 트래픽 처리 불가 |
+| 5-B | `feat/udp-session` | UDP 세션 테이블 (클라이언트 addr → 타겟 소켓 매핑) | UDP는 연결 개념이 없어 패킷마다 출처를 확인해야 함. 세션 테이블로 클라이언트별 상태 유지 |
+| 5-C | `test/udp-forward` | UDP 양방향 포워딩 테스트 | nc -u로 UDP 패킷 전달 검증 |
+
+### Phase 6 — 리버스 터널 프로토콜
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 6-A | `feat/tunnel-protocol` | 터널 프로토콜 헤더 설계 (magic / type / session_id / length / payload) | 에이전트↔서버 간 메시지를 구분할 바이너리 프로토콜 정의. 없으면 여러 세션을 하나의 TCP 연결에서 구분 불가 |
+| 6-B | `feat/tunnel-agent` | TunnelAgent — 서버로 역방향 연결 유지 + heartbeat 송신 | OtoRAS 핵심. NAT 뒤 클라이언트가 서버에 먼저 연결해두는 구조. 이게 없으면 서버에서 클라이언트에 연결할 방법이 없음 |
+| 6-C | `feat/tunnel-server` | TunnelServer — 에이전트 연결 수신 + 세션 ID 발급 + 세션 맵 관리 | 서버 측에서 어떤 에이전트가 연결되어 있는지 추적. 외부 요청이 들어오면 올바른 에이전트 터널로 전달 |
+| 6-D | `feat/tunnel-forward` | 외부 클라이언트 요청 → 터널 역방향 포워딩 | 실제 데이터 흐름 완성. 외부→서버→터널→에이전트→내부서버 경로 구현 |
+
+### Phase 7 — Zero Trust 인증 (mTLS / JWT)
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 7-A | `feat/mtls-verify` | mTLS 클라이언트 인증서 검증 + CA 체인 확인 | 네트워크 위치와 무관하게 인증서로 신원 확인. VPN처럼 네트워크 자체를 신뢰하지 않는 Zero Trust의 핵심 |
+| 7-B | `feat/jwt-parse` | JWT 파싱 + 서명 검증 (HS256/RS256) | HTTP 헤더의 Bearer 토큰으로 사용자/서비스 인증. mTLS가 장치 인증이라면 JWT는 사용자 인증 |
+| 7-C | `feat/access-policy` | 접근 제어 정책 (터널별 / 사용자별 허용 규칙) | 인증만으로는 부족. 인증된 사용자가 어떤 터널/리소스에 접근 가능한지 제어 필요 |
+| 7-D | `test/auth-cases` | 유효/만료/위조 토큰 + 미인증 접근 차단 테스트 | 보안 로직은 정상 케이스보다 실패 케이스가 더 중요 |
+
+### Phase 8 — Guacamole 프로토콜 연동
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 8-A | `feat/guac-parser` | Guacamole instruction 파서 (길이 접두사 텍스트 프로토콜) | 브라우저↔게이트웨이 간 통신 포맷. 이게 없으면 브라우저에서 RDP/VNC를 제어할 수 없음 |
+| 8-B | `feat/guac-rdp` | RDP 연결 + 화면 스트리밍 (libfreerdp FetchContent) | 윈도우 원격 데스크톱. 기업 환경에서 가장 많이 쓰이는 원격 프로토콜 |
+| 8-C | `feat/guac-ssh` | SSH 연결 + 터미널 스트리밍 (libssh2 FetchContent) | 서버 관리의 표준. 브라우저에서 바로 SSH 터미널 접근 |
+| 8-D | `feat/guac-vnc` | VNC 연결 + 화면 스트리밍 | Linux 데스크톱 원격 접속. RDP를 지원하지 않는 환경 대응 |
+| 8-E | `feat/guac-websocket` | 브라우저 WebSocket 연결 + Guacamole 스트림 연결 | 브라우저는 TCP를 직접 못 씀. WebSocket으로 감싸서 Guacamole 프로토콜 전달 |
+
+### Phase 9 — 컨트롤 플레인
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 9-A | `feat/tunnel-registry` | 터널 레지스트리 — 에이전트 등록/해제/상태 추적 | Phase 6까지는 에이전트가 하나라는 가정. 여러 에이전트를 동시에 관리하려면 중앙 레지스트리 필요 |
+| 9-B | `feat/session-router` | 세션 라우터 — 외부 요청을 올바른 터널로 매핑 | 에이전트가 여럿일 때 요청이 어느 터널로 가야 하는지 결정하는 라우팅 로직 |
+| 9-C | `feat/multi-tenant` | 멀티 테넌트 — 사용자별 터널 격리 | 같은 서버에서 여러 사용자의 터널이 서로 간섭하지 않도록 격리. 실제 서비스 운영의 전제 조건 |
+
+### Phase 10 — REST API
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 10-A | `feat/http-server` | 경량 HTTP 서버 (cpp-httplib FetchContent) | 터널 상태를 외부에서 조회/제어하려면 API 엔드포인트 필요. 관리 UI의 백엔드 역할 |
+| 10-B | `feat/api-tunnels` | GET /tunnels, GET /tunnels/:id 엔드포인트 | 현재 연결된 에이전트 목록과 상태를 조회. 운영 중 모니터링의 기본 |
+| 10-C | `feat/api-manage` | POST /tunnels, DELETE /tunnels/:id 엔드포인트 | 터널 생성/삭제를 API로 제어. 자동화 배포/스크립트에서 활용 |
+| 10-D | `feat/api-auth` | API 인증 미들웨어 (API 키 검증) | 관리 API가 인증 없이 열려있으면 누구나 터널을 제어 가능. 최소한 API 키로 보호 필요 |
+
+### Phase 11 — 재연결 및 안정성
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 11-A | `feat/heartbeat` | Heartbeat ping/pong + 타임아웃 감지 | 네트워크 단절 시 TCP는 한참 후에야 연결 종료를 감지. Heartbeat로 빠르게 감지하고 재연결 트리거 |
+| 11-B | `feat/reconnect` | 지수 백오프 자동 재연결 (1s → 2s → 4s → max 60s) | 서버 재시작/네트워크 불안정 시 에이전트가 자동 복구. 운영 환경에서 필수 |
+| 11-C | `feat/metrics` | 연결 수 / 전송량 / 오류율 메트릭 수집 + 로그 출력 | 문제 발생 시 원인 추적. 장기 운영 시 성능 트렌드 파악 |
+
+### Phase 12 — 배포
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 12-A | `build/dockerfile` | Dockerfile (서버용 / 에이전트용 분리) | 환경에 무관하게 동일하게 배포. 서버와 에이전트는 역할이 달라 이미지를 분리 |
+| 12-B | `build/systemd` | systemd 서비스 파일 (자동 시작 / 재시작 정책) | 리눅스 서버에서 프로세스를 데몬으로 관리. 서버 재부팅 후 자동 복구 |
+| 12-C | `build/compose` | docker-compose (서버 + 게이트웨이 + 설정 볼륨) | 서버/게이트웨이를 한 번에 올리는 로컬 개발 및 배포 환경 구성 |
 
 ---
 
@@ -135,16 +210,15 @@ PR 본문 필수 항목 (모두 포함할 것):
 
 FetchContent로 관리하는 라이브러리:
 - nlohmann/json v3.11.3
+- Google Test v1.14.0
 
 FetchContent 추가 방법:
 ```cmake
-include(FetchContent)
 FetchContent_Declare(
-    nlohmann_json
-    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
-    DOWNLOAD_NO_EXTRACT TRUE
+    <이름>
+    URL https://github.com/<경로>/archive/refs/tags/<버전>.tar.gz
 )
-FetchContent_MakeAvailable(nlohmann_json)
+FetchContent_MakeAvailable(<이름>)
 ```
 
 ---
@@ -216,24 +290,32 @@ if (fd < 0) {
 tunnel-proxy/
 ├── include/
 │   ├── core/
-│   │   ├── basic_proxy.h
-│   │   └── epoll_proxy.h       # Phase 2 (예정)
+│   │   ├── basic_proxy.h        # Phase 1 완료
+│   │   ├── epoll_proxy.h        # Phase 2 진행 중
+│   │   ├── tls_proxy.h          # Phase 4 예정
+│   │   ├── tunnel_agent.h       # Phase 6 예정
+│   │   ├── tunnel_server.h      # Phase 6 예정
+│   │   └── control_plane.h      # Phase 9 예정
 │   └── utils/
 │       ├── config.h
 │       └── logger.h
 ├── src/
 │   ├── main.cpp
 │   ├── basic_proxy.cpp
+│   ├── epoll_proxy.cpp
 │   └── utils/
 │       ├── config.cpp
 │       └── logger.cpp
 ├── tests/
 │   ├── CMakeLists.txt
-│   └── test_logger.cpp
+│   ├── phase1/
+│   │   ├── test_config.cpp
+│   │   └── test_logger.cpp
+│   └── phase2/                  # Phase 2 완료 후 활성화
 ├── scripts/
 │   ├── build.sh
 │   ├── test.sh
-│   └── gen_cert.sh
+│   └── gen_cert.sh              # Phase 4에서 사용
 ├── config.json
 ├── CMakeLists.txt
 └── CLAUDE.md
