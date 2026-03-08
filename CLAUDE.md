@@ -89,24 +89,35 @@ git commit -m "<type>(<scope>): <description>"
 
 ```bash
 git push origin <브랜치명>
-gh pr create --title "<커밋 제목>" --body "$(cat <<'EOF'
-## 변경 사항
-- 항목1
-- 항목2
-
-## 빌드
-\`\`\`
-[100%] Built target proxy
-\`\`\`
-EOF
-)" --base master
+gh pr create --title "<커밋 제목>" --body "..." --base master
 gh pr merge --squash --delete-branch
 git checkout master && git pull origin master
 ```
 
-PR 본문 필수 항목:
-- **변경 사항**: 구현한 항목 목록
-- **빌드**: 성공 출력 결과
+PR 본문 필수 항목 (모두 포함할 것):
+
+```
+## 작업 배경
+- 왜 이 작업이 필요했는가
+- 없으면 무엇이 문제였는가 / 어떤 한계가 있었는가
+
+## 변경 사항
+- 파일명: 구체적으로 무엇을 했는가
+
+## 설계 결정
+- 여러 방법 중 왜 이 방식을 선택했는가
+- 트레이드오프가 있었다면 기록
+
+## 빌드 및 테스트 결과
+\`\`\`
+[100%] Built target proxy
+100% tests passed, N tests failed out of N
+\`\`\`
+
+## 다음 단계
+- 이 작업으로 무엇이 가능해졌는가
+- 다음에 이어서 할 작업
+```
 
 ---
 
