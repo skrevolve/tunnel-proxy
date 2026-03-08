@@ -47,6 +47,8 @@ nc localhost 8080
 
 ## 시나리오 1 — nc 양방향 채팅
 
+<img width="1898" height="750" alt="스크린샷 2026-03-09 023841" src="https://github.com/user-attachments/assets/035d60a9-2972-4502-964d-ddaf53d17752" />
+
 터미널 3개 필요.
 
 ```bash
