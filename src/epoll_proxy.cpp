@@ -290,36 +290,65 @@ void EpollProxy::close_connection(int fd) {
 }
 
 void EpollProxy::forward_data(int from_fd, int to_fd) {
-    // ET 모드: 이벤트가 한 번 오면 EAGAIN이 날 때까지 전부 읽어야 한다.
-    // 읽다가 EAGAIN이 오면 "현재 읽을 데이터를 모두 소진했다"는 의미.
-    // 이벤트 루프로 돌아가 다음 이벤트를 기다린다.
-    char buffer[4096];
+    // splice(): 커널→유저→커널 복사 없이 fd 간 데이터를 직접 전달한다.
+    //
+    // read→write 방식의 문제:
+    //   read(from_fd, buf)  : 커널 수신 버퍼 → 유저 공간 (복사 1회)
+    //   write(to_fd, buf)   : 유저 공간 → 커널 송신 버퍼 (복사 2회)
+    //
+    // splice()의 데이터 경로:
+    //   splice(from_fd → pipe[1]): 커널 수신 버퍼 → 파이프 버퍼 (페이지 이동)
+    //   splice(pipe[0] → to_fd) : 파이프 버퍼 → 커널 송신 버퍼 (페이지 이동)
+    //   파이프가 중간 버퍼 역할. 유저 공간을 거치지 않는다.
+    //
+    // Phase 3-B에서 파이프를 호출마다 생성하는 비용을 풀로 제거 예정.
+
+    int pipefd[2];
+    if (pipe2(pipefd, O_NONBLOCK | O_CLOEXEC) < 0) {
+        Logger::error("[EpollProxy] pipe2: " + std::string(strerror(errno)));
+        close_connection(from_fd);
+        return;
+    }
 
     while (true) {
-        ssize_t n = read(from_fd, buffer, sizeof(buffer));
+        // 1단계: from_fd → pipe write end
+        //   SPLICE_F_MOVE   : 페이지를 복사 대신 이동하도록 커널에 힌트
+        //   SPLICE_F_NONBLOCK: 파이프 연산을 논블로킹으로
+        //   65536 (64KB)    : 파이프 기본 버퍼 크기에 맞춘 청크 크기
+        ssize_t n = splice(from_fd, nullptr, pipefd[1], nullptr,
+                           65536, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // 버퍼 소진, 정상
+            close(pipefd[0]);
+            close(pipefd[1]);
             close_connection(from_fd);
             return;
         }
         if (n == 0) {
             // EOF: 상대방이 연결을 정상 종료 (FIN)
+            close(pipefd[0]);
+            close(pipefd[1]);
             close_connection(from_fd);
             return;
         }
 
-        // partial write 처리:
-        // write()가 요청한 바이트를 한 번에 다 쓰지 못할 수 있다.
-        // 남은 데이터를 to_fd 버퍼가 받을 수 있을 때까지 반복해서 쓴다.
+        // 2단계: pipe read end → to_fd
+        // splice도 partial 전송이 가능하므로 루프 처리
         ssize_t written = 0;
         while (written < n) {
-            ssize_t w = write(to_fd, buffer + written, n - written);
+            ssize_t w = splice(pipefd[0], nullptr, to_fd, nullptr,
+                               n - written, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
             if (w <= 0) {
+                close(pipefd[0]);
+                close(pipefd[1]);
                 close_connection(from_fd);
                 return;
             }
             written += w;
         }
     }
+
+    close(pipefd[0]);
+    close(pipefd[1]);
 }
