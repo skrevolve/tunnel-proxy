@@ -111,6 +111,15 @@ private:
     // ── 소켓 초기화 ───────────────────────────────────────────────────────────
 
     /**
+     * 타겟 서버에 논블로킹 TCP 연결을 수립한다.
+     *
+     * socket() → connect() 순서로 연결.
+     * accept_connection()에서 client_fd마다 한 번씩 호출된다.
+     * 연결 실패 시 예외를 던진다.
+     */
+    int connect_to_target(const std::string& ip, int port);
+
+    /**
      * 논블로킹 리스닝 소켓 생성
      *
      * BasicProxy::create_listening_socket()과 거의 같지만

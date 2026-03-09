@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <thread>
 #include <chrono>
+#include <atomic>
+#include <string>
 
 // ── 헬퍼: 사용 가능한 임시 포트를 할당받는다 ──────────────────────────────────
 //
@@ -115,8 +117,6 @@ TEST(EpollProxyLifecycle, RunAndStop) {
 //
 // EpollProxy가 바인딩된 포트에 TCP 연결을 시도해
 // connect()가 성공(= 커널 수준에서 SYN-ACK 반환)하는지 검증한다.
-// run()은 실행 중이지만 accept_connection()은 아직 스텁이라 연결을 처리하지는 않는다.
-// 중요한 것은 "커널 listen 큐에 연결이 수락됐는가"이다.
 TEST(EpollProxyNetwork, SocketIsListening) {
     int port = get_free_port();
     EpollProxy proxy(port, "127.0.0.1", 9999);
@@ -140,4 +140,174 @@ TEST(EpollProxyNetwork, SocketIsListening) {
     t.join();
 
     EXPECT_EQ(ret, 0) << "connect() failed — proxy is not listening on port " << port;
+}
+
+// ── 헬퍼: 에코 서버 ────────────────────────────────────────────────────────────
+//
+// 클라이언트가 보낸 데이터를 그대로 돌려보내는 단순 TCP 서버.
+// Phase 2-C 포워딩 테스트에서 "타겟 서버" 역할을 한다.
+// stop_flag가 세팅되면 accept 루프를 종료한다.
+static void run_echo_server(int server_fd, std::atomic<bool>& stop_flag) {
+    while (!stop_flag) {
+        // accept 타임아웃을 위해 select 사용
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(server_fd, &rfds);
+        timeval tv{ 0, 100000 };  // 100ms
+        if (select(server_fd + 1, &rfds, nullptr, nullptr, &tv) <= 0) continue;
+
+        int conn = accept(server_fd, nullptr, nullptr);
+        if (conn < 0) continue;
+
+        // 에코: 받은 데이터를 그대로 돌려보낸다
+        std::thread([conn]() {
+            char buf[4096];
+            while (true) {
+                ssize_t n = read(conn, buf, sizeof(buf));
+                if (n <= 0) break;
+                ssize_t w = 0;
+                while (w < n) {
+                    ssize_t r = write(conn, buf + w, n - w);
+                    if (r <= 0) goto done;
+                    w += r;
+                }
+            }
+            done:
+            close(conn);
+        }).detach();
+    }
+}
+
+// ── 테스트 6: 단방향 포워딩 — client → proxy → echo server → proxy → client ──
+//
+// 에코 서버를 타겟으로 두고 EpollProxy를 경유해 데이터를 전송한다.
+// 클라이언트가 보낸 메시지가 에코 서버를 거쳐 그대로 돌아와야 한다.
+// 이게 통과하면 accept_connection, forward_data, close_connection이
+// 모두 올바르게 동작하는 것이다.
+TEST(EpollProxyForward, EchoRoundTrip) {
+    // 에코 서버 준비
+    int echo_port  = get_free_port();
+    int proxy_port = get_free_port();
+
+    int echo_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(echo_server_fd, 0);
+    int opt = 1;
+    setsockopt(echo_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in echo_addr{};
+    echo_addr.sin_family      = AF_INET;
+    echo_addr.sin_addr.s_addr = INADDR_ANY;
+    echo_addr.sin_port        = htons(static_cast<uint16_t>(echo_port));
+    ASSERT_EQ(bind(echo_server_fd, reinterpret_cast<sockaddr*>(&echo_addr), sizeof(echo_addr)), 0);
+    ASSERT_EQ(listen(echo_server_fd, 16), 0);
+
+    std::atomic<bool> echo_stop{false};
+    std::thread echo_t([&]() { run_echo_server(echo_server_fd, echo_stop); });
+
+    // 프록시 시작
+    EpollProxy proxy(proxy_port, "127.0.0.1", echo_port);
+    std::thread proxy_t([&proxy]() { proxy.run(); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 클라이언트 연결
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(static_cast<uint16_t>(proxy_port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    ASSERT_EQ(connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // 데이터 송신
+    const std::string msg = "hello epoll";
+    ssize_t sent = write(client_fd, msg.c_str(), msg.size());
+    EXPECT_EQ(sent, static_cast<ssize_t>(msg.size()));
+
+    // 에코 수신
+    char buf[64] = {};
+    // 최대 500ms 동안 응답을 기다린다
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(client_fd, &rfds);
+    timeval tv{ 0, 500000 };
+    int ready = select(client_fd + 1, &rfds, nullptr, nullptr, &tv);
+    ASSERT_GT(ready, 0) << "timed out waiting for echo";
+
+    ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+    EXPECT_GT(n, 0);
+    EXPECT_EQ(std::string(buf, n), msg);
+
+    // 정리
+    close(client_fd);
+    proxy.stop();
+    proxy_t.join();
+
+    echo_stop = true;
+    shutdown(echo_server_fd, SHUT_RDWR);
+    echo_t.join();
+    close(echo_server_fd);
+}
+
+// ── 테스트 7: 연결 카운터 — 연결/해제 시 카운터가 정확한가 ───────────────────
+//
+// 클라이언트가 연결되면 active_connections가 1 증가하고
+// 연결을 닫으면 1 감소해야 한다.
+// 카운터가 틀리면 운영 시 연결 수 모니터링이 불가능하다.
+TEST(EpollProxyForward, ConnectionCountTracking) {
+    int echo_port  = get_free_port();
+    int proxy_port = get_free_port();
+
+    int echo_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(echo_server_fd, 0);
+    int opt = 1;
+    setsockopt(echo_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in echo_addr{};
+    echo_addr.sin_family      = AF_INET;
+    echo_addr.sin_addr.s_addr = INADDR_ANY;
+    echo_addr.sin_port        = htons(static_cast<uint16_t>(echo_port));
+    ASSERT_EQ(bind(echo_server_fd, reinterpret_cast<sockaddr*>(&echo_addr), sizeof(echo_addr)), 0);
+    ASSERT_EQ(listen(echo_server_fd, 16), 0);
+
+    std::atomic<bool> echo_stop{false};
+    std::thread echo_t([&]() { run_echo_server(echo_server_fd, echo_stop); });
+
+    EpollProxy proxy(proxy_port, "127.0.0.1", echo_port);
+    std::thread proxy_t([&proxy]() { proxy.run(); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    EXPECT_EQ(proxy.get_total_connections(),  0u);
+    EXPECT_EQ(proxy.get_active_connections(), 0u);
+
+    // 연결 수립
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(static_cast<uint16_t>(proxy_port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    ASSERT_EQ(connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(proxy.get_total_connections(),  1u);
+    EXPECT_EQ(proxy.get_active_connections(), 1u);
+
+    // 연결 해제 — 클라이언트가 FIN을 보내면 proxy가 EOF를 감지하고 close_connection 호출
+    close(client_fd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(proxy.get_active_connections(), 0u);
+    EXPECT_EQ(proxy.get_total_connections(),  1u);  // total은 감소하지 않음
+
+    proxy.stop();
+    proxy_t.join();
+
+    echo_stop = true;
+    shutdown(echo_server_fd, SHUT_RDWR);
+    echo_t.join();
+    close(echo_server_fd);
 }

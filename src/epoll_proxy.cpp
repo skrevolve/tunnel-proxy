@@ -182,107 +182,144 @@ void EpollProxy::remove_from_epoll(int fd) {
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 }
 
-// ── 이벤트 처리 (Phase 2-C에서 구현) ──────────────────────────────────────────
+// ── 타겟 연결 ─────────────────────────────────────────────────────────────────
+
+int EpollProxy::connect_to_target(const std::string& ip, int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::runtime_error("socket: " + std::string(strerror(errno)));
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(static_cast<uint16_t>(port));
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+        close(fd);
+        throw std::runtime_error("inet_pton: invalid address " + ip);
+    }
+
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        throw std::runtime_error("connect to " + ip + ":" + std::to_string(port) +
+                                 " failed: " + strerror(errno));
+    }
+
+    return fd;
+}
+
+// ── 이벤트 처리 ───────────────────────────────────────────────────────────────
 
 void EpollProxy::accept_connection() {
-    // ET 모드에서 listen_fd에 EPOLLIN 이벤트가 오면
-    // 대기 중인 연결이 여러 개일 수 있다.
-    // EAGAIN이 올 때까지 accept()를 반복해 모두 처리해야 한다.
-    //
-    // 구현 예시:
-    //   while (true) {
-    //       int client_fd = accept(listen_fd_, nullptr, nullptr);
-    //       if (client_fd < 0) {
-    //           if (errno == EAGAIN || errno == EWOULDBLOCK) break; // 다 처리함
-    //           Logger::error("accept: " + std::string(strerror(errno)));
-    //           break;
-    //       }
-    //       set_nonblocking(client_fd);
-    //
-    //       int target_fd = connect_to_target(target_ip_, target_port_);
-    //       set_nonblocking(target_fd);
-    //
-    //       connections_[client_fd] = { target_fd, true  };
-    //       connections_[target_fd] = { client_fd, false };
-    //
-    //       add_to_epoll(client_fd, EPOLLIN | EPOLLET);
-    //       add_to_epoll(target_fd, EPOLLIN | EPOLLET);
-    //
-    //       total_connections_++;
-    //       active_connections_++;
-    //   }
+    // ET 모드: listen_fd에 이벤트가 한 번 오면 대기 중인 연결이 여러 개일 수 있다.
+    // EAGAIN이 올 때까지 accept()를 반복해 큐를 비워야 한다.
+    // 한 번만 accept하면 나머지 연결은 다음 이벤트가 오지 않아 영원히 처리 안 됨.
+    while (true) {
+        int client_fd = accept(listen_fd_, nullptr, nullptr);
+        if (client_fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // 큐 소진
+            Logger::error("[EpollProxy] accept: " + std::string(strerror(errno)));
+            break;
+        }
+
+        set_nonblocking(client_fd);
+
+        int target_fd = -1;
+        try {
+            target_fd = connect_to_target(target_ip_, target_port_);
+        } catch (const std::exception& e) {
+            Logger::error("[EpollProxy] connect_to_target: " + std::string(e.what()));
+            close(client_fd);
+            continue;
+        }
+        set_nonblocking(target_fd);
+
+        // 양방향 매핑: client_fd ↔ target_fd
+        // 한쪽 fd에 이벤트가 오면 반대쪽 fd를 즉시 찾기 위해 양쪽을 키로 등록한다.
+        connections_[client_fd] = { target_fd, true  };
+        connections_[target_fd] = { client_fd, false };
+
+        add_to_epoll(client_fd, EPOLLIN | EPOLLET);
+        add_to_epoll(target_fd, EPOLLIN | EPOLLET);
+
+        total_connections_++;
+        active_connections_++;
+
+        Logger::info("[EpollProxy] new connection (client_fd=" + std::to_string(client_fd) +
+                     " target_fd=" + std::to_string(target_fd) +
+                     ") total=" + std::to_string(total_connections_.load()));
+    }
 }
 
 void EpollProxy::handle_event(int fd, uint32_t events) {
-    // 이벤트 종류별 처리:
-    //
-    //   EPOLLERR, EPOLLHUP: 에러 또는 연결 끊김 → close_connection()
-    //   EPOLLIN            : 읽을 데이터 도착 → forward_data(fd, peer_fd)
-    //
-    // 구현 예시:
-    //   if (events & (EPOLLERR | EPOLLHUP)) {
-    //       close_connection(fd);
-    //       return;
-    //   }
-    //   if (events & EPOLLIN) {
-    //       auto it = connections_.find(fd);
-    //       if (it == connections_.end()) return;  // 알 수 없는 fd
-    //       forward_data(fd, it->second.peer_fd);
-    //   }
-    (void)fd; (void)events;
+    // EPOLLERR: 소켓 에러 (네트워크 이상 등)
+    // EPOLLHUP: 상대방이 연결을 닫음 (half-close 또는 RST)
+    // 두 경우 모두 연결을 정리한다.
+    if (events & (EPOLLERR | EPOLLHUP)) {
+        close_connection(fd);
+        return;
+    }
+
+    if (events & EPOLLIN) {
+        auto it = connections_.find(fd);
+        if (it == connections_.end()) return;  // 이미 정리된 fd
+        forward_data(fd, it->second.peer_fd);
+    }
 }
 
 void EpollProxy::close_connection(int fd) {
-    // 연결 종료 시 양쪽 fd를 모두 정리해야 한다.
-    //
-    // 구현 예시:
-    //   auto it = connections_.find(fd);
-    //   if (it == connections_.end()) return;
-    //
-    //   int peer_fd = it->second.peer_fd;
-    //
-    //   remove_from_epoll(fd);
-    //   remove_from_epoll(peer_fd);
-    //
-    //   close(fd);
-    //   close(peer_fd);
-    //
-    //   connections_.erase(fd);
-    //   connections_.erase(peer_fd);
-    //
-    //   active_connections_--;
-    (void)fd;
+    auto it = connections_.find(fd);
+    if (it == connections_.end()) return;  // 이미 정리됐거나 알 수 없는 fd
+
+    int peer_fd = it->second.peer_fd;
+
+    // epoll에서 제거 후 close — 순서 중요:
+    // close 후에도 epoll이 이 fd를 참조하면 잘못된 이벤트가 발생할 수 있다.
+    remove_from_epoll(fd);
+    remove_from_epoll(peer_fd);
+
+    close(fd);
+    close(peer_fd);
+
+    connections_.erase(fd);
+    connections_.erase(peer_fd);
+
+    active_connections_--;
+
+    Logger::debug("[EpollProxy] connection closed (fd=" + std::to_string(fd) +
+                  " peer_fd=" + std::to_string(peer_fd) + ")");
 }
 
 void EpollProxy::forward_data(int from_fd, int to_fd) {
-    // ET 모드용 논블로킹 read/write 루프
-    //
-    // BasicProxy::forward_data()와의 차이:
-    //   BasicProxy: 블로킹 read. 데이터가 없으면 대기.
-    //   EpollProxy: 논블로킹 read. EAGAIN이 오면 즉시 반환.
-    //
-    // 구현 예시:
-    //   char buffer[4096];
-    //   while (true) {
-    //       ssize_t n = read(from_fd, buffer, sizeof(buffer));
-    //
-    //       if (n < 0) {
-    //           if (errno == EAGAIN || errno == EWOULDBLOCK) break; // 다 읽음, 루프 탈출
-    //           close_connection(from_fd);  // 실제 에러
-    //           return;
-    //       }
-    //       if (n == 0) {
-    //           close_connection(from_fd);  // EOF: 상대방이 연결 종료
-    //           return;
-    //       }
-    //
-    //       // partial write 처리
-    //       ssize_t written = 0;
-    //       while (written < n) {
-    //           ssize_t w = write(to_fd, buffer + written, n - written);
-    //           if (w <= 0) { close_connection(from_fd); return; }
-    //           written += w;
-    //       }
-    //   }
-    (void)from_fd; (void)to_fd;
+    // ET 모드: 이벤트가 한 번 오면 EAGAIN이 날 때까지 전부 읽어야 한다.
+    // 읽다가 EAGAIN이 오면 "현재 읽을 데이터를 모두 소진했다"는 의미.
+    // 이벤트 루프로 돌아가 다음 이벤트를 기다린다.
+    char buffer[4096];
+
+    while (true) {
+        ssize_t n = read(from_fd, buffer, sizeof(buffer));
+
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // 버퍼 소진, 정상
+            close_connection(from_fd);
+            return;
+        }
+        if (n == 0) {
+            // EOF: 상대방이 연결을 정상 종료 (FIN)
+            close_connection(from_fd);
+            return;
+        }
+
+        // partial write 처리:
+        // write()가 요청한 바이트를 한 번에 다 쓰지 못할 수 있다.
+        // 남은 데이터를 to_fd 버퍼가 받을 수 있을 때까지 반복해서 쓴다.
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(to_fd, buffer + written, n - written);
+            if (w <= 0) {
+                close_connection(from_fd);
+                return;
+            }
+            written += w;
+        }
+    }
 }
