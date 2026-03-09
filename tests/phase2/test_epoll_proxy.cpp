@@ -311,3 +311,84 @@ TEST(EpollProxyForward, ConnectionCountTracking) {
     echo_t.join();
     close(echo_server_fd);
 }
+
+// ── 테스트 8: 대용량 데이터 — splice partial 전송 누락 없는가 ─────────────────
+//
+// splice()는 파이프 버퍼 크기(64KB) 단위로 처리한다.
+// 512KB를 전송해 partial splice 루프가 데이터를 유실 없이 전달하는지 검증한다.
+// 바이트 수와 내용이 모두 일치해야 통과한다.
+TEST(EpollProxyForward, LargeDataNoLoss) {
+    const size_t DATA_SIZE = 512 * 1024;  // 512KB
+
+    int echo_port  = get_free_port();
+    int proxy_port = get_free_port();
+
+    int echo_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(echo_server_fd, 0);
+    int opt = 1;
+    setsockopt(echo_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in echo_addr{};
+    echo_addr.sin_family      = AF_INET;
+    echo_addr.sin_addr.s_addr = INADDR_ANY;
+    echo_addr.sin_port        = htons(static_cast<uint16_t>(echo_port));
+    ASSERT_EQ(bind(echo_server_fd, reinterpret_cast<sockaddr*>(&echo_addr), sizeof(echo_addr)), 0);
+    ASSERT_EQ(listen(echo_server_fd, 16), 0);
+
+    std::atomic<bool> echo_stop{false};
+    std::thread echo_t([&]() { run_echo_server(echo_server_fd, echo_stop); });
+
+    EpollProxy proxy(proxy_port, "127.0.0.1", echo_port);
+    std::thread proxy_t([&proxy]() { proxy.run(); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(static_cast<uint16_t>(proxy_port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    ASSERT_EQ(connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+
+    // 송신 데이터 생성 (반복 패턴)
+    std::vector<uint8_t> send_buf(DATA_SIZE);
+    for (size_t i = 0; i < DATA_SIZE; i++) send_buf[i] = static_cast<uint8_t>(i & 0xFF);
+
+    // 별도 스레드에서 전송 (수신 루프와 동시에 진행)
+    std::thread sender([&]() {
+        size_t sent = 0;
+        while (sent < DATA_SIZE) {
+            ssize_t w = write(client_fd, send_buf.data() + sent, DATA_SIZE - sent);
+            if (w <= 0) break;
+            sent += w;
+        }
+    });
+
+    // 수신 루프 — 전부 받을 때까지 대기
+    std::vector<uint8_t> recv_buf(DATA_SIZE);
+    size_t received = 0;
+    while (received < DATA_SIZE) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(client_fd, &rfds);
+        timeval tv{ 2, 0 };  // 2초 타임아웃
+        if (select(client_fd + 1, &rfds, nullptr, nullptr, &tv) <= 0) break;
+        ssize_t n = read(client_fd, recv_buf.data() + received, DATA_SIZE - received);
+        if (n <= 0) break;
+        received += n;
+    }
+
+    sender.join();
+
+    EXPECT_EQ(received, DATA_SIZE) << "데이터 유실: " << (DATA_SIZE - received) << " bytes";
+    EXPECT_EQ(send_buf, recv_buf) << "데이터 내용 불일치";
+
+    close(client_fd);
+    proxy.stop();
+    proxy_t.join();
+
+    echo_stop = true;
+    shutdown(echo_server_fd, SHUT_RDWR);
+    echo_t.join();
+    close(echo_server_fd);
+}
