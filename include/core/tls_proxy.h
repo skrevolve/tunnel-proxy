@@ -3,6 +3,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <vector>
 #include <unordered_map>
 #include <openssl/ssl.h>
 
@@ -106,6 +107,17 @@ private:
         int  peer_fd;    // 데이터를 전달할 반대쪽 fd
         bool is_client;  // true: 클라이언트 측 fd / false: 타겟 측 fd
         SSL* ssl;        // 클라이언트 측(is_client=true)만 non-null
+
+        /**
+         * 이 fd에 쓰다가 EAGAIN/WANT_WRITE로 막힌 미전송 데이터 버퍼
+         *
+         * target_fd 엔트리: write() EAGAIN 시 남은 평문 데이터를 저장
+         * client_fd 엔트리: SSL_write() WANT_WRITE 시 남은 평문 데이터를 저장
+         *
+         * Phase 4-B까지는 EAGAIN이 오면 연결을 바로 종료했다.
+         * 버퍼에 저장해두고 EPOLLOUT 이벤트가 오면 flush_write_buf()가 재전송한다.
+         */
+        std::vector<char> write_buf;
     };
 
     // ── SSL 초기화 ────────────────────────────────────────────────────────────
@@ -199,6 +211,20 @@ private:
      * 3. pending_ssl_에서 제거
      */
     void close_pending(int fd);
+
+    /**
+     * write_buf에 쌓인 미전송 데이터를 재전송한다. (Phase 4-C 추가)
+     *
+     * EPOLLOUT 이벤트가 오면 handle_event()에서 호출한다.
+     *
+     * - is_client=false (target_fd): write()로 평문 재전송
+     * - is_client=true  (client_fd): SSL_write()로 암호화 재전송
+     *
+     * 전송 완료 시: write_buf 비우고 mod_epoll(EPOLLIN | EPOLLET) → EPOLLOUT 해제
+     * 또 EAGAIN  시: 전송된 부분만 제거하고 return (EPOLLOUT 유지)
+     * 에러       시: close_connection()
+     */
+    void flush_write_buf(int fd);
 
     /**
      * 클라이언트(TLS)에서 읽어 타겟(평문)으로 전달한다.
