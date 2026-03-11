@@ -137,6 +137,51 @@ valgrind --leak-check=full ./proxy
 strace -e trace=network ./proxy
 ```
 
+```
+● 세션 시작할 때 채팅창에 슬래시 커맨드로 입력하면 된다.
+
+  ---
+  /new-phase — 세션 시작
+
+  /new-phase 6-A feat/tunnel-protocol
+  → master pull + feat/tunnel-protocol 브랜치 생성 후 구현 시작
+
+  /new-phase 6-D test/tunnel-forward last
+  → master pull + 브랜치 생성 + 시나리오 먼저 제안 (last = Phase 마지막 세션)
+
+  ---
+  /check-build — 빌드 확인
+
+  /check-build
+  → cmake + make -j$(nproc) 실행. 에러 있으면 바로 수정.
+
+  ---
+  /finish-phase — 마무리
+
+  /finish-phase
+  → 커밋 → push → CI 확인 → CLAUDE.md 템플릿대로 PR 생성까지 한 번에.
+
+  ---
+  실제 세션 흐름 예시
+
+  사용자: /new-phase 6-A feat/tunnel-protocol
+  Claude: (master pull + 브랜치 생성 후 구현)
+
+  사용자: /check-build
+  Claude: (빌드 확인, 에러 시 수정)
+
+  사용자: /finish-phase
+  Claude: (커밋 + push + CI 통과 확인 + PR 생성)
+
+  마지막 세션이면:
+
+  사용자: /new-phase 6-D test/tunnel-forward last
+  Claude: 시나리오 목록 제안...
+
+  사용자: ㅇㅇ
+  Claude: 테스트 코드 작성 시작
+```
+
 ## 참고 자료
 - A Tour of C++ (Chapter 1-6)
 - man pages: `man 2 socket`, `man 7 epoll`
