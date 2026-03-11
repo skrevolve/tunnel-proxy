@@ -40,3 +40,19 @@ add_executable(test_phase3
 target_include_directories(test_phase3 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase3 GTest::gtest_main pthread)
 gtest_discover_tests(test_phase3)
+
+# ─────────────────────────────────────────
+# Phase 4 테스트 (TLS 인증서 검증)
+# ─────────────────────────────────────────
+add_executable(test_phase4
+    phase4/test_tls_verify.cpp
+    ../src/tls_proxy.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase4 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(test_phase4
+    GTest::gtest_main
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+gtest_discover_tests(test_phase4)
