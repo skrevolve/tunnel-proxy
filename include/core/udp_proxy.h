@@ -2,6 +2,7 @@
 
 #include <string>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <unordered_map>
 #include <netinet/in.h>
@@ -60,13 +61,14 @@ public:
      * - listen_fd를 epoll에 등록
      * - target_addr_ 미리 계산 (패킷마다 inet_pton 반복 방지)
      *
-     * @param local_port  클라이언트 패킷을 수신할 포트
-     * @param target_ip   포워딩할 타겟 서버 IP
-     * @param target_port 포워딩할 타겟 서버 포트
-     * @param max_events  epoll_wait 최대 이벤트 수
+     * @param local_port       클라이언트 패킷을 수신할 포트
+     * @param target_ip        포워딩할 타겟 서버 IP
+     * @param target_port      포워딩할 타겟 서버 포트
+     * @param max_events       epoll_wait 최대 이벤트 수
+     * @param session_timeout  마지막 패킷 이후 세션 유지 시간(초). 기본 30초.
      */
     UdpProxy(int local_port, const std::string& target_ip, int target_port,
-             int max_events = 64);
+             int max_events = 64, int session_timeout = 30);
 
     ~UdpProxy();
 
@@ -82,17 +84,22 @@ public:
     void stop();
 
 private:
+    using Clock     = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+
     /**
      * 세션 상태
      *
      * 클라이언트 1개당 Session 1개 생성.
-     * target_fd: 이 클라이언트 전용으로 타겟과 통신하는 UDP 소켓.
-     *            connect()로 특정 타겟에 바인딩되어 있어 send()/recv() 사용.
-     * client_addr: 응답을 돌려줄 클라이언트 주소.
+     * target_fd:     이 클라이언트 전용으로 타겟과 통신하는 UDP 소켓.
+     *               connect()로 특정 타겟에 바인딩되어 있어 send()/recv() 사용.
+     * client_addr:  응답을 돌려줄 클라이언트 주소.
+     * last_activity: 마지막 패킷 수신 시각. 타임아웃 판단 기준.
      */
     struct Session {
         int         target_fd;
         sockaddr_in client_addr;
+        TimePoint   last_activity;
     };
 
     // ── 소켓 유틸리티 ─────────────────────────────────────────────────────────
@@ -153,6 +160,15 @@ private:
     void close_session(int target_fd);
 
     /**
+     * session_timeout_ 초과한 비활성 세션을 일괄 정리한다.
+     *
+     * run() 루프에서 cleanup_interval_ 마다 호출.
+     * sessions_by_target_ 전체를 순회해 last_activity 기준으로 만료 여부 판단.
+     * 이터레이터 무효화를 피하기 위해 만료 fd 목록을 모은 뒤 close_session().
+     */
+    void cleanup_expired_sessions();
+
+    /**
      * sockaddr_in을 "ip:port" 문자열 키로 변환한다.
      *
      * unordered_map 키로 사용.
@@ -171,6 +187,10 @@ private:
     int         max_events_;
     std::atomic<bool> running_;
 
+    std::chrono::seconds session_timeout_;   // 세션 비활성 타임아웃 (기본 30초)
+    std::chrono::seconds cleanup_interval_;  // cleanup 호출 간격 (기본 10초)
+    TimePoint            last_cleanup_;      // 마지막 cleanup 수행 시각
+
     /**
      * 클라이언트 주소("ip:port") → 세션
      *
@@ -184,8 +204,6 @@ private:
      *
      * 타겟 응답이 오면 target_fd로 어떤 클라이언트에게 돌려줄지 찾는다.
      * sessions_by_client_[key].client_addr로 sendto한다.
-     *
-     * TODO Phase 5-B: last_activity 추가해 타임아웃 세션 정리
      */
     std::unordered_map<int, std::string> sessions_by_target_;
 };

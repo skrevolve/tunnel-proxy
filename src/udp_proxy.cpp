@@ -10,18 +10,22 @@
 #include <cstring>
 #include <stdexcept>
 #include <cerrno>
+#include <chrono>
 #include <vector>
 
 // ── 생성자 / 소멸자 ────────────────────────────────────────────────────────────
 
 UdpProxy::UdpProxy(int local_port, const std::string& target_ip, int target_port,
-                   int max_events)
+                   int max_events, int session_timeout)
     : listen_fd_(-1)
     , epoll_fd_(-1)
     , target_ip_(target_ip)
     , target_port_(target_port)
     , max_events_(max_events)
     , running_(false)
+    , session_timeout_(session_timeout)
+    , cleanup_interval_(10)
+    , last_cleanup_(Clock::now())
 {
     // 1. epoll 인스턴스 생성
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
@@ -112,6 +116,13 @@ void UdpProxy::run() {
                 handle_target_data(fd);
             }
         }
+
+        // cleanup_interval_ 마다 만료 세션 정리
+        auto now = Clock::now();
+        if (now - last_cleanup_ >= cleanup_interval_) {
+            cleanup_expired_sessions();
+            last_cleanup_ = now;
+        }
     }
 
     Logger::info("[UdpProxy] event loop stopped");
@@ -180,6 +191,8 @@ void UdpProxy::handle_client_data() {
         ssize_t sent = send(sess->target_fd, buf, static_cast<size_t>(n), 0);
         if (sent < 0) {
             Logger::error("[UdpProxy] send(target): " + std::string(strerror(errno)));
+        } else {
+            sess->last_activity = Clock::now();
         }
     }
 }
@@ -226,6 +239,9 @@ void UdpProxy::handle_target_data(int target_fd) {
                               sizeof(client_addr));
         if (sent < 0) {
             Logger::error("[UdpProxy] sendto(client): " + std::string(strerror(errno)));
+        } else {
+            // sit 이터레이터는 위에서 find로 얻었으므로 여기서 직접 갱신
+            sit->second.last_activity = Clock::now();
         }
     }
 }
@@ -276,13 +292,35 @@ UdpProxy::Session* UdpProxy::get_or_create_session(const sockaddr_in& client_add
     }
 
     // 5. 세션 테이블 등록
-    Session sess{ target_fd, client_addr };
+    Session sess{ target_fd, client_addr, Clock::now() };
     sessions_by_client_[key]        = sess;
     sessions_by_target_[target_fd]  = key;
 
     Logger::info("[UdpProxy] new session: " + key + " → target_fd=" + std::to_string(target_fd));
 
     return &sessions_by_client_[key];
+}
+
+void UdpProxy::cleanup_expired_sessions() {
+    auto now = Clock::now();
+
+    // 이터레이터 무효화를 피하기 위해 만료 fd 목록을 먼저 수집
+    std::vector<int> expired;
+    for (auto& [fd, key] : sessions_by_target_) {
+        auto it = sessions_by_client_.find(key);
+        if (it == sessions_by_client_.end()) {
+            expired.push_back(fd);
+            continue;
+        }
+        if (now - it->second.last_activity >= session_timeout_) {
+            expired.push_back(fd);
+        }
+    }
+
+    for (int fd : expired) {
+        Logger::info("[UdpProxy] session timeout: fd=" + std::to_string(fd));
+        close_session(fd);
+    }
 }
 
 void UdpProxy::close_session(int target_fd) {
