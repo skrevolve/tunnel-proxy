@@ -359,9 +359,9 @@ void EpollProxy::forward_data(int from_fd, int to_fd) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     // to_fd 수신 버퍼가 가득 참.
                     // 상대방(클라이언트/에코서버)이 데이터를 읽어 버퍼가 빌 때까지 대기.
-                    // poll() 타임아웃 2초: 그 안에도 못 쓰면 비정상으로 간주하고 종료.
+                    // poll() 타임아웃 30초: CI 러너처럼 스레드 스케줄링이 느린 환경 대응.
                     struct pollfd pfd = { to_fd, POLLOUT, 0 };
-                    if (poll(&pfd, 1, 2000) <= 0) {
+                    if (poll(&pfd, 1, 30000) <= 0) {
                         close(pipefd[0]);
                         close(pipefd[1]);
                         close_connection(from_fd);
