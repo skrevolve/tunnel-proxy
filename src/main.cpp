@@ -1,6 +1,6 @@
 #include <iostream>
 #include <csignal>
-#include "core/basic_proxy.h"
+#include "core/epoll_proxy.h"
 #include "utils/config.h"
 #include "utils/logger.h"
 
@@ -16,7 +16,7 @@
 //       stop()은 atomic 쓰기 + shutdown() 호출이므로 사실상 안전하게 동작하나,
 //       엄밀히는 async-signal-safe가 보장된 write() + _Exit() 정도만 권장된다.
 //       Phase 11(안정성)에서 self-pipe trick으로 개선 예정.
-BasicProxy* g_proxy = nullptr;
+EpollProxy* g_proxy = nullptr;
 
 // ── 시그널 핸들러 ──────────────────────────────────────────────────────────────
 
@@ -78,12 +78,14 @@ int main(int argc, char* argv[]) {
         Logger::set_log_file(config.get_log_file());
 
         // 2단계: 프록시 생성 (생성자에서 소켓 바인딩까지 완료)
+        // Phase 3-A 기준: EpollProxy (epoll ET + splice zero-copy 포워딩)
+        // local_port, target_ip, target_port 모두 config.json에서 읽어온다.
         Logger::info("Starting proxy...");
         Logger::info("Local port: " + std::to_string(config.get_local_port()));
         Logger::info("Target: " + config.get_target_ip() + ":" +
                      std::to_string(config.get_target_port()));
 
-        BasicProxy proxy(
+        EpollProxy proxy(
             config.get_local_port(),
             config.get_target_ip(),
             config.get_target_port()
@@ -92,7 +94,7 @@ int main(int argc, char* argv[]) {
         // 3단계: 시그널 핸들러 등록
         // proxy가 스택에 있으므로 g_proxy에 주소를 저장한다.
         // std::signal보다 sigaction이 더 안전하지만,
-        // Phase 1에서는 이식성 좋은 std::signal을 사용한다.
+        // Phase 11(안정성)에서 sigaction + self-pipe trick으로 개선 예정.
         g_proxy = &proxy;
         std::signal(SIGINT,  signal_handler);
         std::signal(SIGTERM, signal_handler);
