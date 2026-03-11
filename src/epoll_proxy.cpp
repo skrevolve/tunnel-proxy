@@ -45,12 +45,39 @@ EpollProxy::EpollProxy(int local_port, const std::string& target_ip, int target_
     //    EPOLLIN:  새 연결 도착 (= "읽을 수 있는 상태")
     //    EPOLLET:  edge-triggered 모드 (상태 변화 시 1번만 이벤트 발생)
     add_to_epoll(listen_fd_, EPOLLIN | EPOLLET);
+
+    // 4. 파이프 풀 초기화
+    //    max_events_ 개만큼 미리 생성해둔다.
+    //    epoll_wait 한 번에 최대 max_events_개 이벤트가 오므로
+    //    각 이벤트가 forward_data()를 호출해도 항상 풀에서 꺼낼 수 있다.
+    pipe_pool_.reserve(max_events_);
+    for (int i = 0; i < max_events_; i++) {
+        std::array<int, 2> pipefd;
+        if (pipe2(pipefd.data(), O_NONBLOCK | O_CLOEXEC) < 0) {
+            // 풀 초기화 실패: 지금까지 만든 파이프를 정리하고 예외 전파
+            for (auto& p : pipe_pool_) { close(p[0]); close(p[1]); }
+            close(listen_fd_); listen_fd_ = -1;
+            close(epoll_fd_);  epoll_fd_  = -1;
+            throw std::runtime_error("pipe2 (pool init): " + std::string(strerror(errno)));
+        }
+        pipe_pool_.push_back(pipefd);
+    }
 }
 
 EpollProxy::~EpollProxy() {
     stop();
-    // epoll_fd를 먼저 닫으면 등록된 fd에 대한 이벤트 감시가 중단된다.
-    // 그 다음 listen_fd를 닫는다.
+
+    // 열려있는 연결 fd 정리 (소멸자 fd 누수 방지)
+    std::vector<int> fds;
+    fds.reserve(connections_.size());
+    for (auto& [fd, _] : connections_) fds.push_back(fd);
+    for (int fd : fds) { close(fd); }
+    connections_.clear();
+
+    // 파이프 풀 정리
+    for (auto& p : pipe_pool_) { close(p[0]); close(p[1]); }
+    pipe_pool_.clear();
+
     if (epoll_fd_  >= 0) { close(epoll_fd_);  epoll_fd_  = -1; }
     if (listen_fd_ >= 0) { close(listen_fd_); listen_fd_ = -1; }
 }
@@ -290,25 +317,9 @@ void EpollProxy::close_connection(int fd) {
 }
 
 void EpollProxy::forward_data(int from_fd, int to_fd) {
-    // splice(): 커널→유저→커널 복사 없이 fd 간 데이터를 직접 전달한다.
-    //
-    // read→write 방식의 문제:
-    //   read(from_fd, buf)  : 커널 수신 버퍼 → 유저 공간 (복사 1회)
-    //   write(to_fd, buf)   : 유저 공간 → 커널 송신 버퍼 (복사 2회)
-    //
-    // splice()의 데이터 경로:
-    //   splice(from_fd → pipe[1]): 커널 수신 버퍼 → 파이프 버퍼 (페이지 이동)
-    //   splice(pipe[0] → to_fd) : 파이프 버퍼 → 커널 송신 버퍼 (페이지 이동)
-    //   파이프가 중간 버퍼 역할. 유저 공간을 거치지 않는다.
-    //
-    // Phase 3-B에서 파이프를 호출마다 생성하는 비용을 풀로 제거 예정.
-
-    int pipefd[2];
-    if (pipe2(pipefd, O_NONBLOCK | O_CLOEXEC) < 0) {
-        Logger::error("[EpollProxy] pipe2: " + std::string(strerror(errno)));
-        close_connection(from_fd);
-        return;
-    }
+    // 풀에서 파이프를 꺼낸다.
+    // 풀이 비어있으면 acquire_pipe() 내부에서 새로 생성한다.
+    auto pipefd = acquire_pipe();
 
     while (true) {
         // 1단계: from_fd → pipe write end
@@ -320,6 +331,7 @@ void EpollProxy::forward_data(int from_fd, int to_fd) {
 
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // 버퍼 소진, 정상
+            // 에러: 오염된 파이프를 풀에 반환하지 않고 닫는다
             close(pipefd[0]);
             close(pipefd[1]);
             close_connection(from_fd);
@@ -349,6 +361,28 @@ void EpollProxy::forward_data(int from_fd, int to_fd) {
         }
     }
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    // 정상 종료: 파이프를 풀에 돌려준다
+    release_pipe(pipefd);
+}
+
+// ── 파이프 풀 ─────────────────────────────────────────────────────────────────
+
+std::array<int, 2> EpollProxy::acquire_pipe() {
+    if (!pipe_pool_.empty()) {
+        // 풀 뒤에서 꺼내기: O(1)
+        auto pipefd = pipe_pool_.back();
+        pipe_pool_.pop_back();
+        return pipefd;
+    }
+    // 풀이 비어있으면 새로 생성 (에러 급증 등 예외 상황)
+    std::array<int, 2> pipefd;
+    if (pipe2(pipefd.data(), O_NONBLOCK | O_CLOEXEC) < 0) {
+        throw std::runtime_error("pipe2 (acquire): " + std::string(strerror(errno)));
+    }
+    return pipefd;
+}
+
+void EpollProxy::release_pipe(std::array<int, 2> pipefd) {
+    // 풀 뒤에 추가: O(1)
+    pipe_pool_.push_back(pipefd);
 }

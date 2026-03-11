@@ -3,6 +3,8 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <array>
+#include <vector>
 #include <unordered_map>
 #include <sys/epoll.h>
 
@@ -209,17 +211,35 @@ private:
     void close_connection(int fd);
 
     /**
-     * from_fd에서 읽어 to_fd로 쓰는 논블로킹 데이터 복사. (Phase 2-C에서 구현)
+     * from_fd에서 읽어 to_fd로 splice하는 논블로킹 zero-copy 전달.
      *
-     * ET 모드이므로 EAGAIN이 올 때까지 읽기를 반복해야 한다.
-     * BasicProxy::forward_data()와 달리 블로킹하지 않고 즉시 반환한다.
+     * Phase 3-A: 호출마다 pipe2()/close() 실행 — 시스템 콜 오버헤드 있음
+     * Phase 3-B: pipe_pool_에서 파이프를 꺼내 재사용 — 시스템 콜 절감
      *
-     * EAGAIN 처리 흐름:
-     *   read() 반환값 == -1 && errno == EAGAIN → 현재 읽을 데이터 없음 → 반환
-     *   read() 반환값 == 0                     → EOF, 연결 종료 → close_connection()
-     *   read() 반환값 > 0                      → to_fd에 write 후 계속 읽기
+     * 파이프 수명:
+     *   정상 종료 시 → release_pipe()로 풀에 반환
+     *   에러 발생 시 → close()로 소멸 (오염된 파이프를 풀에 넣지 않음)
      */
     void forward_data(int from_fd, int to_fd);
+
+    // ── 파이프 풀 ─────────────────────────────────────────────────────────────
+
+    /**
+     * 풀에서 파이프 쌍을 꺼낸다.
+     *
+     * 풀이 비어있으면 pipe2()로 새로 생성한다.
+     * 단일 스레드 이벤트 루프에서만 호출되므로 mutex 불필요.
+     */
+    std::array<int, 2> acquire_pipe();
+
+    /**
+     * 사용 완료된 파이프 쌍을 풀에 반환한다.
+     *
+     * 에러 경로에서는 호출하지 않는다.
+     * 오염된 파이프(데이터가 남아있거나 에러 상태)를 풀에 넣으면
+     * 다음 acquire에서 잘못된 데이터가 섞일 수 있다.
+     */
+    void release_pipe(std::array<int, 2> pipefd);
 
     // ── 멤버 변수 ─────────────────────────────────────────────────────────────
 
@@ -245,4 +265,20 @@ private:
      *       멀티스레드로 전환 시 동기화 필요.
      */
     std::unordered_map<int, ConnState> connections_;
+
+    /**
+     * 파이프 쌍 재사용 풀
+     *
+     * Phase 3-A의 문제: forward_data() 호출마다 pipe2() + close() 2회.
+     * 데이터 패킷이 초당 수천 번 오면 시스템 콜 수가 선형으로 증가한다.
+     *
+     * 풀 크기를 max_events_로 초기화하는 이유:
+     *   epoll_wait 한 번에 최대 max_events_개 이벤트가 반환된다.
+     *   각 이벤트가 forward_data()를 1회 호출하면 동시에 최대 max_events_개
+     *   파이프가 필요하다. 풀이 이 수만큼 있으면 acquire 시 항상 풀에서 꺼낼 수 있다.
+     *
+     * 스택(vector의 back())으로 관리하는 이유:
+     *   push_back/pop_back이 O(1). 큐(deque)보다 캐시 친화적.
+     */
+    std::vector<std::array<int, 2>> pipe_pool_;
 };
