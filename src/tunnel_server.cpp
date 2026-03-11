@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <cstring>
+#include <chrono>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -24,8 +25,8 @@ TunnelServer::AgentConn::~AgentConn() {
 
 // ── 생성자 / 소멸자 ─────────────────────────────────────────────────────────
 
-TunnelServer::TunnelServer(int agent_port)
-    : agent_port_(agent_port) {}
+TunnelServer::TunnelServer(int agent_port, int proxy_port)
+    : agent_port_(agent_port), proxy_port_(proxy_port) {}
 
 TunnelServer::~TunnelServer() {
     stop();
@@ -39,6 +40,14 @@ void TunnelServer::run() {
 
     Logger::info("[server] listening for agents on port " +
                  std::to_string(agent_port_));
+
+    // 외부 클라이언트 리스너 시작 (proxy_port > 0인 경우)
+    if (proxy_port_ > 0) {
+        proxy_listen_fd_ = create_listen_socket(proxy_port_);
+        proxy_listener_thread_ = std::thread(&TunnelServer::proxy_accept_loop, this);
+        Logger::info("[server] listening for external clients on port " +
+                     std::to_string(proxy_port_));
+    }
 
     while (running_) {
         sockaddr_in client_addr{};
@@ -79,6 +88,27 @@ void TunnelServer::stop() {
         shutdown(agent_listen_fd_, SHUT_RDWR);
         close(agent_listen_fd_);
         agent_listen_fd_ = -1;
+    }
+
+    if (proxy_listen_fd_ >= 0) {
+        shutdown(proxy_listen_fd_, SHUT_RDWR);
+        close(proxy_listen_fd_);
+        proxy_listen_fd_ = -1;
+    }
+
+    if (proxy_listener_thread_.joinable()) {
+        proxy_listener_thread_.join();
+    }
+
+    // pending OPEN_ACK 대기 스레드들에게 예외 신호
+    {
+        std::lock_guard<std::mutex> lock(pending_open_mutex_);
+        for (auto& [sid, p] : pending_open_) {
+            try { p.set_exception(
+                std::make_exception_ptr(
+                    std::runtime_error("server stopped"))); } catch (...) {}
+        }
+        pending_open_.clear();
     }
 
     // 모든 에이전트 연결 종료 → per-agent thread의 recv 탈출
@@ -271,10 +301,18 @@ void TunnelServer::handle_agent_frame(const std::string& agent_id,
     }
 
     case TunnelMsgType::OPEN_ACK: {
-        // 에이전트가 OPEN을 수락 — external_fd 연결은 6-D에서 처리
         Logger::info("[server] OPEN_ACK session=" +
                      std::to_string(frame.session_id) +
                      " from " + agent_id);
+        // 대기 중인 external client thread에 시그널
+        {
+            std::lock_guard<std::mutex> lock(pending_open_mutex_);
+            auto it = pending_open_.find(frame.session_id);
+            if (it != pending_open_.end()) {
+                try { it->second.set_value(); } catch (...) {}
+                pending_open_.erase(it);
+            }
+        }
         break;
     }
 
@@ -437,6 +475,143 @@ void TunnelServer::send_to_agent(const std::string& agent_id,
         }
         sent += static_cast<size_t>(s);
     }
+}
+
+// ── Phase 6-D: 외부 클라이언트 포워딩 ──────────────────────────────────────
+
+void TunnelServer::set_forward_target(const std::string& agent_id,
+                                      const std::string& target_ip,
+                                      uint16_t target_port) {
+    std::lock_guard<std::mutex> lock(forward_target_mutex_);
+    forward_target_ = ForwardTarget{agent_id, target_ip, target_port};
+    Logger::info("[server] forward target set: agent=" + agent_id +
+                 " target=" + target_ip + ":" + std::to_string(target_port));
+}
+
+void TunnelServer::proxy_accept_loop() {
+    while (running_) {
+        sockaddr_in client_addr{};
+        socklen_t   addr_len = sizeof(client_addr);
+
+        int external_fd = accept(proxy_listen_fd_,
+                                 reinterpret_cast<sockaddr*>(&client_addr),
+                                 &addr_len);
+        if (external_fd < 0) {
+            if (!running_) break;
+            Logger::error("[server] proxy accept failed: " +
+                          std::string(strerror(errno)));
+            continue;
+        }
+
+        char ip_buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, ip_buf, sizeof(ip_buf));
+        Logger::info("[server] external client from " +
+                     std::string(ip_buf) + ":" +
+                     std::to_string(ntohs(client_addr.sin_port)));
+
+        std::thread(&TunnelServer::handle_external_connection, this, external_fd)
+            .detach();
+    }
+}
+
+void TunnelServer::handle_external_connection(int external_fd) {
+    // ── ForwardTarget 조회 ──────────────────────────────────────────────────
+    std::string agent_id, target_ip;
+    uint16_t    target_port;
+    {
+        std::lock_guard<std::mutex> lock(forward_target_mutex_);
+        if (!forward_target_) {
+            Logger::warning("[server] no forward target configured, "
+                            "rejecting external connection");
+            close(external_fd);
+            return;
+        }
+        agent_id    = forward_target_->agent_id;
+        target_ip   = forward_target_->target_ip;
+        target_port = forward_target_->target_port;
+    }
+
+    // ── 세션 개설 + OPEN_ACK 대기 ───────────────────────────────────────────
+    std::promise<void> ack_promise;
+    auto ack_future = ack_promise.get_future();
+
+    uint32_t session_id = open_session(agent_id, target_ip, target_port);
+    if (session_id == 0) {
+        Logger::error("[server] open_session failed for agent " + agent_id);
+        close(external_fd);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pending_open_mutex_);
+        pending_open_[session_id] = std::move(ack_promise);
+    }
+
+    // 에이전트가 내부 서버에 연결할 때까지 대기 (최대 OPEN_ACK_TIMEOUT_S 초)
+    auto status = ack_future.wait_for(
+        std::chrono::seconds(OPEN_ACK_TIMEOUT_S));
+
+    if (status != std::future_status::ready) {
+        Logger::error("[server] OPEN_ACK timeout, session=" +
+                      std::to_string(session_id));
+        {
+            std::lock_guard<std::mutex> lock(pending_open_mutex_);
+            pending_open_.erase(session_id);
+        }
+        close_session(session_id);
+        close(external_fd);
+        return;
+    }
+
+    // future에서 예외 전파 확인 (stop() 호출 등)
+    try {
+        ack_future.get();
+    } catch (...) {
+        close(external_fd);
+        return;
+    }
+
+    // ── external_fd → session 연결 ──────────────────────────────────────────
+    if (!set_session_external_fd(session_id, external_fd)) {
+        Logger::error("[server] session gone before external_fd could be set, "
+                      "session=" + std::to_string(session_id));
+        close(external_fd);
+        return;
+    }
+
+    Logger::info("[server] session=" + std::to_string(session_id) +
+                 " fully established, forwarding started");
+
+    // ── 외부 클라이언트 → 에이전트 포워딩 루프 ─────────────────────────────
+    //   에이전트 → 외부 클라이언트 방향은 handle_agent_frame(DATA)에서 처리.
+    constexpr size_t BUF_SIZE = 4096;
+    uint8_t buf[BUF_SIZE];
+
+    while (running_) {
+        ssize_t n = recv(external_fd, buf, BUF_SIZE, 0);
+        if (n <= 0) break;
+
+        std::vector<uint8_t> data(buf, buf + n);
+        try {
+            send_to_agent(agent_id,
+                          make_data(session_id, std::move(data)));
+        } catch (const std::exception& e) {
+            Logger::error("[server] forward to agent failed: " +
+                          std::string(e.what()));
+            break;
+        }
+    }
+
+    // ── 정리 ────────────────────────────────────────────────────────────────
+    Logger::info("[server] external client closed, session=" +
+                 std::to_string(session_id));
+
+    try {
+        send_to_agent(agent_id, make_close(session_id));
+    } catch (...) {}
+
+    close_session(session_id);
+    close(external_fd);
 }
 
 } // namespace proxy
