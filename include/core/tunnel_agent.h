@@ -1,22 +1,212 @@
 #pragma once
 
+#include "core/tunnel_protocol.h"
+
 #include <string>
+#include <atomic>
+#include <cstdint>
+#include <unordered_map>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 namespace proxy {
 
 /**
  * @file tunnel_agent.h
- * @brief Phase 6-B — 에이전트 (NAT 뒤 클라이언트 측)
+ * @brief Phase 6-B — 리버스 터널 에이전트
  *
- * TODO Phase 6-B (feat/tunnel-agent):
- *   - 서버 IP:포트에 TCP 연결 유지 (역방향 연결)
- *   - HELLO 송신 → HELLO_ACK 수신
- *   - OPEN 수신 → 내부 타겟에 TCP 연결 → OPEN_ACK 송신
- *   - DATA 양방향 포워딩 (session_id별 분리)
- *   - HEARTBEAT 주기적 송신
+ * ── 역방향 연결 구조 ──────────────────────────────────────────────────────────
+ *
+ *   일반 프록시:   클라이언트 → 서버 (클라이언트가 먼저 연결)
+ *   리버스 터널:   에이전트 → 서버 (NAT 뒤의 에이전트가 먼저 서버에 연결)
+ *
+ *   서버는 에이전트의 연결을 유지해두고, 외부 요청이 오면
+ *   이 기존 연결을 통해 에이전트에게 OPEN 프레임을 전송해 새 세션을 요청한다.
+ *
+ * ── 에이전트 동작 흐름 ────────────────────────────────────────────────────────
+ *
+ *   1. connect(server_ip, server_port) → server_fd 수립
+ *   2. HELLO(agent_id) 송신
+ *   3. HELLO_ACK 수신 → 등록 완료
+ *   4. HEARTBEAT 스레드 시작 (heartbeat_interval_s_ 주기)
+ *   5. server_fd에서 프레임 수신 루프:
+ *      - OPEN          → 내부 타겟 연결 + 세션 생성 + per-session reader 시작
+ *      - DATA          → 해당 세션의 target_fd로 데이터 전달
+ *      - CLOSE         → 세션 target_fd 닫기
+ *      - HEARTBEAT_ACK → 무시 (Phase 11-A에서 타임아웃 감지 추가 예정)
+ *   6. per-session reader 스레드: target_fd에서 읽어 DATA 프레임으로 server에 전송
+ *      target EOF 시 CLOSE 프레임 송신 후 세션 자체 정리 + 종료
+ *
+ * ── 세션 멀티플렉싱 ───────────────────────────────────────────────────────────
+ *
+ *   하나의 server_fd(TCP 연결) 위에 여러 세션을 동시에 유지.
+ *   수신 측(main thread): session_id로 어느 target_fd에 데이터를 보낼지 분기.
+ *   송신 측(per-session thread): target에서 읽은 데이터를 session_id가 붙은
+ *                                DATA 프레임으로 포장해 server_fd에 전송.
+ *
+ * ── 동시성 모델 ───────────────────────────────────────────────────────────────
+ *
+ *   스레드 종류:
+ *     - main thread (run()):     server_fd에서 프레임 읽기 (단독 reader)
+ *     - heartbeat thread:        server_fd에 HEARTBEAT 쓰기
+ *     - per-session thread (N):  target_fd에서 읽어 server_fd에 DATA 쓰기
+ *
+ *   동기화:
+ *     send_mutex_:     server_fd 쓰기를 직렬화. heartbeat + per-session 스레드가 공유.
+ *     sessions_mutex_: sessions_ 맵 접근 보호.
+ *
+ *   server_fd 읽기는 main thread 단독이므로 뮤텍스 불필요.
  */
+class TunnelAgent {
+public:
+    /**
+     * @param server_ip            서버 IPv4 주소
+     * @param server_port          서버 포트 번호
+     * @param agent_id             에이전트 고유 식별자 (HELLO 프레임에 포함)
+     * @param heartbeat_interval_s HEARTBEAT 송신 주기 (초). 기본값 30초.
+     */
+    TunnelAgent(const std::string& server_ip, int server_port,
+                const std::string& agent_id,
+                int heartbeat_interval_s = 30);
 
-// TODO: Phase 6-B에서 구현
-// class TunnelAgent { ... };
+    ~TunnelAgent();
+
+    /**
+     * 서버 연결 → HELLO 교환 → 이벤트 루프 진입 (블로킹)
+     *
+     * 연결 실패, HELLO_ACK 미수신, 서버 연결 종료 시 예외 또는 정상 반환.
+     * 재연결 로직은 Phase 11-B에서 추가 예정.
+     */
+    void run();
+
+    /**
+     * 이벤트 루프 중지
+     *
+     * server_fd shutdown → main thread의 recv_frame 탈출.
+     * 모든 세션 target_fd close → per-session 스레드 종료 유도.
+     * heartbeat 스레드 join.
+     */
+    void stop();
+
+    /// 현재 활성 세션 수 반환
+    uint32_t get_active_sessions() const;
+
+private:
+    /**
+     * 활성 세션 정보
+     *
+     * target_fd: 에이전트가 내부 서버에 수립한 TCP 소켓 fd
+     * reader:    target_fd → server_fd 포워딩 스레드 (joinable)
+     *
+     * 스레드 종료 조건:
+     *   A) target EOF/오류 → 스레드 스스로 CLOSE 송신 후 세션 맵에서 제거
+     *   B) close_session() 호출 → target_fd shutdown → 스레드 recv 에러 → 종료 후 join
+     */
+    struct Session {
+        int         target_fd;
+        std::thread reader;
+
+        explicit Session(int tfd) : target_fd(tfd) {}
+        ~Session();
+        Session(const Session&)            = delete;
+        Session& operator=(const Session&) = delete;
+    };
+
+    // ── 네트워크 ──────────────────────────────────────────────────────────────
+
+    /// 서버에 TCP 연결. 성공 시 fd 반환, 실패 시 예외.
+    int connect_to_server();
+
+    /// target_ip:target_port에 TCP 연결. 성공 시 fd 반환, 실패 시 예외.
+    int connect_to_target(const std::string& ip, uint16_t port);
+
+    /**
+     * fd에서 정확히 n 바이트 읽기 (부분 읽기 반복 처리)
+     *
+     * TCP recv()는 요청보다 적게 반환할 수 있다.
+     * n 바이트를 모두 읽을 때까지 반복한다.
+     *
+     * @return true = 성공, false = EOF 또는 오류
+     */
+    bool recv_exact(int fd, uint8_t* buf, size_t n);
+
+    /**
+     * fd에서 완전한 TunnelFrame 수신 (2단계: 헤더 16B → payload)
+     *
+     * @return true = 성공, false = 연결 종료 또는 파싱 오류
+     */
+    bool recv_frame(int fd, TunnelFrame& out);
+
+    /**
+     * server_fd에 프레임 직렬화 후 전송 (send_mutex_ 보호)
+     *
+     * MSG_NOSIGNAL: peer 닫힘 시 SIGPIPE 대신 errno=EPIPE 반환.
+     * 전송 실패 시 예외를 던진다.
+     */
+    void send_frame(const TunnelFrame& frame);
+
+    // ── 프레임 핸들러 ─────────────────────────────────────────────────────────
+
+    /// OPEN: 내부 타겟 연결 + 세션 생성 + OPEN_ACK 송신
+    void handle_open(const TunnelFrame& frame);
+
+    /// DATA: 해당 세션의 target_fd로 페이로드 전달
+    void handle_data(const TunnelFrame& frame);
+
+    /// CLOSE: 세션 종료 + 자원 정리
+    void handle_close(const TunnelFrame& frame);
+
+    /**
+     * 세션 종료 + 자원 정리
+     *
+     * sessions_mutex_ 보호 하에 세션을 맵에서 제거.
+     * target_fd shutdown + close → reader 스레드 recv 에러 → 스레드 종료.
+     * reader.join()으로 스레드 완전 종료 확인.
+     */
+    void close_session(uint32_t session_id);
+
+    // ── 스레드 함수 ───────────────────────────────────────────────────────────
+
+    /**
+     * per-session reader 스레드 함수
+     *
+     * target_fd에서 데이터를 읽어 DATA 프레임으로 server에 전달.
+     * EOF/오류 감지 시:
+     *   1. CLOSE 프레임을 server에 송신
+     *   2. sessions_ 맵에서 자신을 제거 (reader.detach() 후 erase)
+     *   3. 스레드 함수 반환
+     *
+     * 왜 close_session()을 호출하지 않는가:
+     *   close_session()은 reader.join()을 호출한다.
+     *   스레드가 자기 자신을 join하면 데드락이 발생한다.
+     *   대신 reader.detach()로 스레드를 분리한 뒤 맵에서 제거한다.
+     */
+    void target_reader(uint32_t session_id, int target_fd);
+
+    /**
+     * HEARTBEAT 전송 스레드 함수
+     *
+     * heartbeat_interval_s_ 주기로 HEARTBEAT 프레임을 서버에 전송.
+     * 1초 단위로 running_을 확인해 stop() 시 빠르게 종료.
+     */
+    void heartbeat_loop();
+
+    // ── 멤버 변수 ─────────────────────────────────────────────────────────────
+
+    std::string server_ip_;
+    int         server_port_;
+    std::string agent_id_;
+    int         heartbeat_interval_s_;
+
+    std::atomic<bool> running_{false};
+    int               server_fd_{-1};  // run() 실행 중에만 유효
+
+    std::mutex send_mutex_;             // server_fd 쓰기 직렬화
+    mutable std::mutex sessions_mutex_; // sessions_ 맵 보호
+
+    std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_;
+    std::thread heartbeat_thread_;
+};
 
 } // namespace proxy
