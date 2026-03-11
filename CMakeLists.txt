@@ -51,6 +51,7 @@ set(SOURCES
     src/tunnel_protocol.cpp
     src/tunnel_agent.cpp
     src/tunnel_server.cpp
+    src/mtls_context.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
