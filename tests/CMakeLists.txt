@@ -14,7 +14,7 @@ target_link_libraries(test_phase1
     GTest::gtest_main
     nlohmann_json::nlohmann_json
 )
-gtest_discover_tests(test_phase1)
+gtest_discover_tests(test_phase1 PROPERTIES LABELS "phase1")
 
 # ─────────────────────────────────────────
 # Phase 2 테스트
@@ -26,7 +26,7 @@ add_executable(test_phase2
 )
 target_include_directories(test_phase2 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase2 GTest::gtest_main)
-gtest_discover_tests(test_phase2)
+gtest_discover_tests(test_phase2 PROPERTIES LABELS "phase2")
 
 # ─────────────────────────────────────────
 # Phase 3 테스트 (zero-copy 벤치마크)
@@ -39,7 +39,7 @@ add_executable(test_phase3
 )
 target_include_directories(test_phase3 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase3 GTest::gtest_main pthread)
-gtest_discover_tests(test_phase3)
+gtest_discover_tests(test_phase3 PROPERTIES LABELS "phase3")
 
 # ─────────────────────────────────────────
 # Phase 4 테스트 (TLS 인증서 검증)
@@ -55,7 +55,7 @@ target_link_libraries(test_phase4
     OpenSSL::SSL
     OpenSSL::Crypto
 )
-gtest_discover_tests(test_phase4)
+gtest_discover_tests(test_phase4 PROPERTIES LABELS "phase4")
 
 # ─────────────────────────────────────────
 # Phase 5 테스트 (UDP 포워딩)
@@ -67,4 +67,4 @@ add_executable(test_phase5
 )
 target_include_directories(test_phase5 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase5 GTest::gtest_main pthread)
-gtest_discover_tests(test_phase5)
+gtest_discover_tests(test_phase5 PROPERTIES LABELS "phase5")

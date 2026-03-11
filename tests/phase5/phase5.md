@@ -156,7 +156,7 @@ echo "pong" | nc -u -q1 localhost 9090
 자동화 테스트 (session_timeout=1초, cleanup_interval=1초로 단축):
 
 ```bash
-ctest -R UdpForward/SessionTimeout --output-on-failure
+ctest -R "UdpForward.SessionTimeout" --output-on-failure
 ```
 
 **예상 출력**:
@@ -174,7 +174,7 @@ ctest -R UdpForward/SessionTimeout --output-on-failure
 
 ```bash
 cd ~/tunnel-proxy/build
-ctest -R test_phase5 --output-on-failure
+ctest -L phase5 --output-on-failure
 ```
 
 **예상 출력**:

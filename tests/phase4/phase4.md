@@ -46,6 +46,20 @@ openssl s_client -connect localhost:8443 -CAfile certs/server.crt -quiet
 
 ---
 
+## ctest 라벨 안내
+
+`gtest_discover_tests`는 테스트를 `TestSuite.TestName` 형식으로 등록한다.
+`ctest -R test_phase4`처럼 실행 파일 이름으로는 필터링되지 않는다.
+Phase 단위로 실행하려면 `-L` (라벨) 옵션을 사용한다.
+
+```bash
+ctest -L phase4 --output-on-failure      # Phase 4 전체
+ctest -R "TlsCtxTest" --output-on-failure       # 특정 suite만
+ctest -R "TlsHandshakeTest.ValidCertSucceeds" --output-on-failure  # 특정 케이스만
+```
+
+---
+
 ## 시나리오 1 — TLS 컨텍스트 초기화
 
 유효한 인증서/키 파일로 TlsProxy가 정상적으로 초기화되는지 확인한다.
@@ -53,13 +67,12 @@ openssl s_client -connect localhost:8443 -CAfile certs/server.crt -quiet
 
 ```bash
 cd ~/tunnel-proxy/build
-ctest -R TlsCtxTest --output-on-failure
+ctest -R "TlsCtxTest" --output-on-failure
 ```
 
 **예상 출력**:
 
 ```
-[==========] Running 4 tests from 1 test suite.
 [ RUN      ] TlsCtxTest.ValidCertLoads
 [       OK ] TlsCtxTest.ValidCertLoads
 [ RUN      ] TlsCtxTest.MissingCertFileThrows
@@ -68,7 +81,6 @@ ctest -R TlsCtxTest --output-on-failure
 [       OK ] TlsCtxTest.MissingKeyFileThrows
 [ RUN      ] TlsCtxTest.MismatchedKeyThrows
 [       OK ] TlsCtxTest.MismatchedKeyThrows
-[==========] 4 tests passed.
 ```
 
 **검증**: 4개 모두 통과하면 `SSL_CTX_use_certificate_file` / `SSL_CTX_use_PrivateKey_file` / `SSL_CTX_check_private_key` 흐름 정상.
@@ -80,7 +92,7 @@ ctest -R TlsCtxTest --output-on-failure
 유효한 인증서를 가진 서버에 클라이언트가 TLS 핸드셰이크를 맺는지 확인한다.
 
 ```bash
-ctest -R TlsHandshakeTest/ValidCertSucceeds --output-on-failure
+ctest -R "TlsHandshakeTest.ValidCertSucceeds" --output-on-failure
 ```
 
 **예상 출력**:
@@ -100,7 +112,7 @@ ctest -R TlsHandshakeTest/ValidCertSucceeds --output-on-failure
 `SSL_VERIFY_PEER`가 활성화된 클라이언트는 만료 인증서를 수락해서는 안 된다.
 
 ```bash
-ctest -R TlsHandshakeTest/ExpiredCertRejected --output-on-failure
+ctest -R "TlsHandshakeTest.ExpiredCertRejected" --output-on-failure
 ```
 
 **예상 출력**:
@@ -120,7 +132,7 @@ TLS 없이 평문으로 연결하면 차단되는지 확인한다.
 TLS 서버에 일반 `nc`로 붙으면 핸드셰이크 단계에서 프로토콜 오류가 발생해야 한다.
 
 ```bash
-ctest -R TlsHandshakeTest/PlainTextRejected --output-on-failure
+ctest -R "TlsHandshakeTest.PlainTextRejected" --output-on-failure
 ```
 
 **예상 출력**:
@@ -138,16 +150,12 @@ ctest -R TlsHandshakeTest/PlainTextRejected --output-on-failure
 
 ```bash
 cd ~/tunnel-proxy/build
-ctest -R test_phase4 --output-on-failure
+ctest -L phase4 --output-on-failure
 ```
 
 **예상 출력**:
 
 ```
-[==========] Running 7 tests from 2 test suites.
-...
-[==========] 7 tests passed.
-
 100% tests passed, 0 tests failed out of 7
 Total Test time (real) = X.XXs
 ```
