@@ -2,6 +2,7 @@
 #include "utils/logger.h"
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <poll.h>       // poll(), POLLOUT
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>      // fcntl, O_NONBLOCK
@@ -346,12 +347,34 @@ void EpollProxy::forward_data(int from_fd, int to_fd) {
         }
 
         // 2단계: pipe read end → to_fd
-        // splice도 partial 전송이 가능하므로 루프 처리
+        // splice도 partial 전송이 가능하므로 루프 처리.
+        // to_fd의 수신 버퍼가 가득 찬 경우 EAGAIN이 반환되는데,
+        // 이때 파이프에는 아직 n바이트가 남아있다.
+        // 연결을 끊지 않고 poll()로 쓰기 가능 상태를 기다린 뒤 재시도한다.
         ssize_t written = 0;
         while (written < n) {
             ssize_t w = splice(pipefd[0], nullptr, to_fd, nullptr,
                                n - written, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-            if (w <= 0) {
+            if (w < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // to_fd 수신 버퍼가 가득 참.
+                    // 상대방(클라이언트/에코서버)이 데이터를 읽어 버퍼가 빌 때까지 대기.
+                    // poll() 타임아웃 2초: 그 안에도 못 쓰면 비정상으로 간주하고 종료.
+                    struct pollfd pfd = { to_fd, POLLOUT, 0 };
+                    if (poll(&pfd, 1, 2000) <= 0) {
+                        close(pipefd[0]);
+                        close(pipefd[1]);
+                        close_connection(from_fd);
+                        return;
+                    }
+                    continue;
+                }
+                close(pipefd[0]);
+                close(pipefd[1]);
+                close_connection(from_fd);
+                return;
+            }
+            if (w == 0) {
                 close(pipefd[0]);
                 close(pipefd[1]);
                 close_connection(from_fd);
