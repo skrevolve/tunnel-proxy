@@ -66,9 +66,12 @@ public:
      * @param target_port      포워딩할 타겟 서버 포트
      * @param max_events       epoll_wait 최대 이벤트 수
      * @param session_timeout  마지막 패킷 이후 세션 유지 시간(초). 기본 30초.
+     * @param cleanup_interval 만료 세션 정리 주기(초). 기본 10초.
+     *                         테스트에서 짧게 설정해 빠른 검증 가능.
      */
     UdpProxy(int local_port, const std::string& target_ip, int target_port,
-             int max_events = 64, int session_timeout = 30);
+             int max_events = 64, int session_timeout = 30,
+             int cleanup_interval = 10);
 
     ~UdpProxy();
 
