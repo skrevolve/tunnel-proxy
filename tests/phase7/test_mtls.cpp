@@ -9,6 +9,7 @@
 #include <openssl/err.h>
 
 #include <sys/socket.h>
+#include <signal.h>
 #include <unistd.h>
 #include <cstdio>
 #include <string>
@@ -23,6 +24,23 @@ using namespace proxy;
 struct TempCert {
     std::string cert_path;
     std::string key_path;
+
+    TempCert() = default;
+    TempCert(const TempCert&) = delete;
+    TempCert& operator=(const TempCert&) = delete;
+    TempCert(TempCert&& o) noexcept
+        : cert_path(std::move(o.cert_path)), key_path(std::move(o.key_path))
+    { o.cert_path.clear(); o.key_path.clear(); }
+    TempCert& operator=(TempCert&& o) noexcept {
+        if (this != &o) {
+            if (!cert_path.empty()) std::remove(cert_path.c_str());
+            if (!key_path.empty())  std::remove(key_path.c_str());
+            cert_path = std::move(o.cert_path);
+            key_path  = std::move(o.key_path);
+            o.cert_path.clear(); o.key_path.clear();
+        }
+        return *this;
+    }
     ~TempCert() {
         if (!cert_path.empty()) std::remove(cert_path.c_str());
         if (!key_path.empty())  std::remove(key_path.c_str());
@@ -163,6 +181,7 @@ TEST(MtlsContextTest, CreateServerAndClient_ValidCerts_Succeeds) {
 // 시나리오 8: get_peer_common_name — socketpair 핸드셰이크 후 CN 추출
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(MtlsContextTest, GetPeerCommonName_ReturnsClientCN) {
+    signal(SIGPIPE, SIG_IGN);
     const std::string expected_cn = "my-tunnel-agent";
     auto certs = make_mtls_cert_set("cn", expected_cn);
 
@@ -231,6 +250,7 @@ TEST(MtlsContextTest, CreateServer_MissingKeyFile_Throws) {
 // 시나리오 11: verify_peer — CA 없는 자체 서명 인증서로 핸드셰이크 실패
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(MtlsContextTest, VerifyPeer_SelfSignedClientWithoutCA_Fails) {
+    signal(SIGPIPE, SIG_IGN);
     // 서버: 정상 CA 세트
     auto server_certs = make_mtls_cert_set("verify_srv");
     // 클라이언트: 다른 CA로 서명된 별도 세트 (server의 CA가 신뢰 안 함)
