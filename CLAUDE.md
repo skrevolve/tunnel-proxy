@@ -151,9 +151,14 @@ Claude가 테스트 코드를 작성하면 코드를 읽고 "이게 내가 원�
 
 ### 2. 브랜치 생성 (Claude)
 
+항상 master를 최신화한 뒤 브랜치를 딴다.
+master에 ci.yml 등 공통 파일이 있으므로, 최신 master 기준으로 브랜치해야
+push 즉시 CI가 트리거된다.
+
 ```bash
+git checkout master && git pull origin master
 git checkout -b <type>/<scope>
-# 예: feat/epoll-init, fix/accept-loop
+# 예: feat/tls-context, fix/accept-loop
 ```
 
 ### 3. 테스트 작성 → 구현 → 빌드 확인 (Claude)
