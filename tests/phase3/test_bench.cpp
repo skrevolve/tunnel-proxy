@@ -149,6 +149,16 @@ TEST(ZeroCopyBench, EpollProxyThroughput10MB) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     double ms = measure_throughput_ms(proxy_port, DATA_SIZE);
+
+    // cleanup을 ASSERT 이전에 수행: ASSERT 실패로 예외가 발생해도
+    // joinable thread 소멸자가 std::terminate를 호출하지 않도록 보장.
+    proxy.stop();
+    proxy_t.join();
+    echo_stop = true;
+    shutdown(echo_fd, SHUT_RDWR);
+    echo_t.join();
+    close(echo_fd);
+
     ASSERT_GT(ms, 0.0) << "전송 실패";
 
     double mb      = static_cast<double>(DATA_SIZE) / (1024.0 * 1024.0);
@@ -160,13 +170,6 @@ TEST(ZeroCopyBench, EpollProxyThroughput10MB) {
 
     // loopback에서 최소 50 MB/s는 나와야 한다 (Debug sanitizer 포함 보수적 기준)
     EXPECT_GT(throughput, 50.0) << "throughput too low: " << throughput << " MB/s";
-
-    proxy.stop();
-    proxy_t.join();
-    echo_stop = true;
-    shutdown(echo_fd, SHUT_RDWR);
-    echo_t.join();
-    close(echo_fd);
 }
 
 // ── 벤치마크: BasicProxy (read/write + 스레드) ────────────────────────────────
@@ -189,6 +192,14 @@ TEST(ZeroCopyBench, BasicProxyThroughput10MB) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     double ms = measure_throughput_ms(proxy_port, DATA_SIZE);
+
+    proxy.stop();
+    proxy_t.join();
+    echo_stop = true;
+    shutdown(echo_fd, SHUT_RDWR);
+    echo_t.join();
+    close(echo_fd);
+
     ASSERT_GT(ms, 0.0) << "전송 실패";
 
     double mb         = static_cast<double>(DATA_SIZE) / (1024.0 * 1024.0);
@@ -199,13 +210,6 @@ TEST(ZeroCopyBench, BasicProxyThroughput10MB) {
               << throughput << " MB/s\n";
 
     EXPECT_GT(throughput, 50.0) << "throughput too low: " << throughput << " MB/s";
-
-    proxy.stop();
-    proxy_t.join();
-    echo_stop = true;
-    shutdown(echo_fd, SHUT_RDWR);
-    echo_t.join();
-    close(echo_fd);
 }
 
 // ── 데이터 무결성: splice + pool 전환 후 내용이 바뀌지 않는가 ─────────────────

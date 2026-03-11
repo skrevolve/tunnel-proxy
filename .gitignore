@@ -27,7 +27,6 @@ Makefile
 # IDE 설정
 .vscode/
 .idea/
-.github/
 *.swp
 *.swo
 *~
