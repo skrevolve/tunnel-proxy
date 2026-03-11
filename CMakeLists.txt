@@ -48,6 +48,7 @@ set(SOURCES
     src/epoll_proxy.cpp
     src/tls_proxy.cpp
     src/udp_proxy.cpp
+    src/tunnel_protocol.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
