@@ -49,6 +49,7 @@ set(SOURCES
     src/tls_proxy.cpp
     src/udp_proxy.cpp
     src/tunnel_protocol.cpp
+    src/tunnel_agent.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
