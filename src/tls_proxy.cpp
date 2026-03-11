@@ -311,8 +311,8 @@ void TlsProxy::continue_handshake(int fd) {
         // 양방향 매핑 등록
         //   connections_[client_fd]: SSL 객체 보관 (포워딩 시 참조)
         //   connections_[target_fd]: SSL 없음 (평문 TCP)
-        connections_[fd]        = { target_fd, true,  ssl     };
-        connections_[target_fd] = { fd,        false, nullptr };
+        connections_[fd]        = { target_fd, true,  ssl,     {} };
+        connections_[target_fd] = { fd,        false, nullptr, {} };
 
         // target_fd도 epoll에 등록
         add_to_epoll(target_fd, EPOLLIN | EPOLLET);
@@ -347,6 +347,15 @@ void TlsProxy::handle_event(int fd, uint32_t events) {
         close_connection(fd);
         return;
     }
+
+    // EPOLLOUT: 이전에 EAGAIN/WANT_WRITE로 막혔던 쓰기 버퍼를 재전송
+    if (events & EPOLLOUT) {
+        flush_write_buf(fd);
+        // flush 중 연결이 끊겼을 수 있으므로 재확인
+        if (connections_.find(fd) == connections_.end()) return;
+    }
+
+    if (!(events & EPOLLIN)) return;
 
     auto it = connections_.find(fd);
     if (it == connections_.end()) return;  // 이미 정리된 fd
@@ -385,10 +394,11 @@ void TlsProxy::forward_client_to_target(int client_fd, SSL* ssl, int target_fd) 
                 ssize_t w = write(target_fd, buf + total, n - total);
                 if (w < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        // 타겟 쓰기 버퍼 가득 참 — 데이터 유실 방지를 위해 연결 종료
-                        // (Phase 4-C에서 EPOLLOUT 기반 쓰기 버퍼링으로 개선 예정)
-                        Logger::debug("[TlsProxy] target write EAGAIN, closing");
-                        close_connection(client_fd);
+                        // 타겟 쓰기 버퍼 가득 참 — 미전송 데이터를 target_fd의 write_buf에 보관
+                        // EPOLLOUT 이벤트가 오면 flush_write_buf()가 재전송한다
+                        auto& tbuf = connections_[target_fd].write_buf;
+                        tbuf.insert(tbuf.end(), buf + total, buf + n);
+                        mod_epoll(target_fd, EPOLLIN | EPOLLOUT | EPOLLET);
                         return;
                     }
                     close_connection(client_fd);
@@ -421,7 +431,7 @@ void TlsProxy::forward_client_to_target(int client_fd, SSL* ssl, int target_fd) 
     }
 }
 
-void TlsProxy::forward_target_to_client(int target_fd, int /*client_fd*/, SSL* ssl) {
+void TlsProxy::forward_target_to_client(int target_fd, int client_fd, SSL* ssl) {
     char buf[16384];
 
     while (true) {
@@ -434,10 +444,17 @@ void TlsProxy::forward_target_to_client(int target_fd, int /*client_fd*/, SSL* s
             int w = SSL_write(ssl, buf, static_cast<int>(n));
             if (w <= 0) {
                 int err = SSL_get_error(ssl, w);
-                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-                    // 클라이언트 쓰기 버퍼 가득 참 — 연결 종료
-                    Logger::debug("[TlsProxy] SSL_write WANT, closing");
-                    close_connection(target_fd);
+                if (err == SSL_ERROR_WANT_WRITE) {
+                    // 클라이언트 쓰기 버퍼 가득 참 — 미전송 데이터를 client_fd의 write_buf에 보관
+                    // EPOLLOUT 이벤트가 오면 flush_write_buf()가 SSL_write로 재전송한다
+                    auto& cbuf = connections_[client_fd].write_buf;
+                    cbuf.insert(cbuf.end(), buf, buf + n);
+                    mod_epoll(client_fd, EPOLLIN | EPOLLOUT | EPOLLET);
+                    return;
+                }
+                if (err == SSL_ERROR_WANT_READ) {
+                    // TLS 재협상(renegotiation) — 클라이언트에서 읽어야 진행됨
+                    // EPOLLIN은 이미 등록돼 있으므로 그대로 대기
                     return;
                 }
                 close_connection(target_fd);
@@ -460,6 +477,63 @@ void TlsProxy::forward_target_to_client(int target_fd, int /*client_fd*/, SSL* s
         }
         close_connection(target_fd);
         return;
+    }
+}
+
+// ── 쓰기 버퍼 플러시 ─────────────────────────────────────────────────────────
+
+void TlsProxy::flush_write_buf(int fd) {
+    auto it = connections_.find(fd);
+    if (it == connections_.end()) return;
+
+    ConnState& state = it->second;
+    auto& buf = state.write_buf;
+    if (buf.empty()) {
+        // 버퍼가 이미 비어있으면 EPOLLOUT만 해제
+        mod_epoll(fd, EPOLLIN | EPOLLET);
+        return;
+    }
+
+    if (!state.is_client) {
+        // target_fd: 평문 write() 재전송
+        ssize_t written = 0;
+        while (written < static_cast<ssize_t>(buf.size())) {
+            ssize_t w = write(fd, buf.data() + written, buf.size() - written);
+            if (w < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // 아직 버퍼 여유 없음 — 전송된 부분 제거 후 EPOLLOUT 유지
+                    buf.erase(buf.begin(), buf.begin() + written);
+                    return;
+                }
+                close_connection(fd);
+                return;
+            }
+            if (w == 0) { close_connection(fd); return; }
+            written += w;
+        }
+        // 전체 전송 완료 — 버퍼 비우고 EPOLLOUT 해제
+        buf.clear();
+        mod_epoll(fd, EPOLLIN | EPOLLET);
+
+    } else {
+        // client_fd: SSL_write() 재전송
+        // SSL_write는 이전에 실패한 것과 동일한 포인터/크기로 재호출해야 한다.
+        // (OpenSSL 내부 상태가 이전 호출을 기억하기 때문)
+        // write_buf 전체를 한 번에 재시도한다.
+        SSL* ssl = state.ssl;
+        int w = SSL_write(ssl, buf.data(), static_cast<int>(buf.size()));
+        if (w <= 0) {
+            int err = SSL_get_error(ssl, w);
+            if (err == SSL_ERROR_WANT_WRITE) {
+                // 아직 버퍼 여유 없음 — EPOLLOUT 유지
+                return;
+            }
+            close_connection(fd);
+            return;
+        }
+        // 전체 전송 완료 — 버퍼 비우고 EPOLLOUT 해제
+        buf.clear();
+        mod_epoll(fd, EPOLLIN | EPOLLET);
     }
 }
 
