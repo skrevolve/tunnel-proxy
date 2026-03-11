@@ -28,6 +28,10 @@ OtoRAS라는 제품의 VPN/원격접속 기술을 학습하고 직접 구현하�
 세션 시작 시 현재 세션 번호를 전달받으면 해당 작업만 완료하고 PR까지 마무리.
 다음 세션 범위는 TODO 주석만 남기고 절대 건드리지 않음.
 
+**세션 종료 기준: PR 생성 완료 = 세션 종료.**
+PR을 올린 뒤 다음 Phase 작업을 이어서 시작하지 않는다.
+이유: 세션이 길어질수록 컨텍스트 요약이 누적되어 다음 세션의 초기 토큰 비용이 폭증한다.
+
 ### Phase 1 — 기본 TCP 프록시 (멀티스레드)
 
 | 세션 | 브랜치 | 작업 | 왜 필요한가 |
@@ -154,17 +158,25 @@ git checkout -b <type>/<scope>
 
 ### 3. 테스트 작성 → 구현 → 빌드 확인 (Claude)
 
+로컬 빌드로 컴파일 에러만 확인한다. ctest는 실행하지 않는다 — CI가 대신한다.
+
 ```bash
 cd build && cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc)
-ctest --output-on-failure
+# 빌드 성공 확인 후 push. ctest는 CI에서 자동 실행됨.
 ```
 
-### 4. 커밋 + PR 생성 (Claude)
+### 4. 커밋 + push + CI 확인 + PR 생성 (Claude)
 
 ```bash
 git add <파일>
 git commit -m "<type>(<scope>): <description>"
 git push origin <브랜치명>
+
+# CI 결과 확인 (push 후 ~1분 대기)
+gh run list --branch <브랜치명> --limit 1
+gh run view <run-id>   # pass/fail 확인
+
+# CI 통과 후 PR 생성
 gh pr create --title "<커밋 제목>" --body "..." --base master
 # 여기서 Claude 작업 종료. 머지는 하지 않는다.
 ```
