@@ -46,6 +46,7 @@ set(SOURCES
     src/main.cpp
     src/basic_proxy.cpp
     src/epoll_proxy.cpp
+    src/tls_proxy.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
