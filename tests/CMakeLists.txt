@@ -27,3 +27,16 @@ add_executable(test_phase2
 target_include_directories(test_phase2 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase2 GTest::gtest_main)
 gtest_discover_tests(test_phase2)
+
+# ─────────────────────────────────────────
+# Phase 3 테스트 (zero-copy 벤치마크)
+# ─────────────────────────────────────────
+add_executable(test_phase3
+    phase3/test_bench.cpp
+    ../src/epoll_proxy.cpp
+    ../src/basic_proxy.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase3 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(test_phase3 GTest::gtest_main pthread)
+gtest_discover_tests(test_phase3)
