@@ -53,6 +53,7 @@ set(SOURCES
     src/tunnel_server.cpp
     src/mtls_context.cpp
     src/jwt_verifier.cpp
+    src/access_policy.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
