@@ -68,3 +68,21 @@ add_executable(test_phase5
 target_include_directories(test_phase5 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase5 GTest::gtest_main pthread)
 gtest_discover_tests(test_phase5 PROPERTIES LABELS "phase5")
+
+# ─────────────────────────────────────────
+# Phase 7 테스트 (JWT + 접근 제어)
+# ─────────────────────────────────────────
+add_executable(test_phase7
+    phase7/test_auth_cases.cpp
+    ../src/jwt_verifier.cpp
+    ../src/access_policy.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase7 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(test_phase7
+    GTest::gtest_main
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(test_phase7 PROPERTIES LABELS "phase7")
