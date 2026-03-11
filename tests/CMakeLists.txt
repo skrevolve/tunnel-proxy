@@ -56,3 +56,15 @@ target_link_libraries(test_phase4
     OpenSSL::Crypto
 )
 gtest_discover_tests(test_phase4)
+
+# ─────────────────────────────────────────
+# Phase 5 테스트 (UDP 포워딩)
+# ─────────────────────────────────────────
+add_executable(test_phase5
+    phase5/test_udp_forward.cpp
+    ../src/udp_proxy.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase5 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(test_phase5 GTest::gtest_main pthread)
+gtest_discover_tests(test_phase5)

@@ -16,7 +16,7 @@
 // ── 생성자 / 소멸자 ────────────────────────────────────────────────────────────
 
 UdpProxy::UdpProxy(int local_port, const std::string& target_ip, int target_port,
-                   int max_events, int session_timeout)
+                   int max_events, int session_timeout, int cleanup_interval)
     : listen_fd_(-1)
     , epoll_fd_(-1)
     , target_ip_(target_ip)
@@ -24,7 +24,7 @@ UdpProxy::UdpProxy(int local_port, const std::string& target_ip, int target_port
     , max_events_(max_events)
     , running_(false)
     , session_timeout_(session_timeout)
-    , cleanup_interval_(10)
+    , cleanup_interval_(cleanup_interval)
     , last_cleanup_(Clock::now())
 {
     // 1. epoll 인스턴스 생성
