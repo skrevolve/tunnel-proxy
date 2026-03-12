@@ -54,6 +54,7 @@ set(SOURCES
     src/mtls_context.cpp
     src/jwt_verifier.cpp
     src/access_policy.cpp
+    src/guac_parser.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
