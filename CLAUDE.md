@@ -2,14 +2,15 @@
 
 ## 프로젝트 목표
 
-OtoRAS라는 제품의 VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
+VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
 
 구현 목표 (단계별):
 1. **리버스 터널** — 클라이언트가 NAT 뒤에 있어도 서버에서 연결 가능하게
 2. **Zero Trust 인증** — 네트워크 신뢰 없이 매 요청마다 인증 (mTLS/JWT)
 3. **Guacamole 프로토콜** — 서버에서 직접 렌더링해서 브라우저로 전달 (RDP/VNC/SSH 웹화)
+4. **webkit headless 스트리밍** — HTTPS 웹페이지를 서버에서 headless 브라우저로 렌더링, WebSocket으로 클라이언트에 스트리밍 (Guacamole가 미지원하는 웹 브라우징 원격 접근)
 
-최종 결과물: Cloudflare Tunnel + Apache Guacamole를 C++로 직접 만든 것
+최종 결과물: Cloudflare Tunnel + Apache Guacamole + Remote Browser Isolation을 C++로 직접 만든 것
 
 ---
 
@@ -80,7 +81,7 @@ PR을 올린 뒤 다음 Phase 작업을 이어서 시작하지 않는다.
 | 세션 | 브랜치 | 작업 | 왜 필요한가 |
 |------|--------|------|-------------|
 | 6-A | `feat/tunnel-protocol` | 터널 프로토콜 헤더 설계 (magic / type / session_id / length / payload) | 에이전트↔서버 간 메시지를 구분할 바이너리 프로토콜 정의. 없으면 여러 세션을 하나의 TCP 연결에서 구분 불가 |
-| 6-B | `feat/tunnel-agent` | TunnelAgent — 서버로 역방향 연결 유지 + heartbeat 송신 | OtoRAS 핵심. NAT 뒤 클라이언트가 서버에 먼저 연결해두는 구조. 이게 없으면 서버에서 클라이언트에 연결할 방법이 없음 |
+| 6-B | `feat/tunnel-agent` | TunnelAgent — 서버로 역방향 연결 유지 + heartbeat 송신 | 엔진의 핵심. NAT 뒤 클라이언트가 서버에 먼저 연결해두는 구조. 이게 없으면 서버에서 클라이언트에 연결할 방법이 없음 |
 | 6-C | `feat/tunnel-server` | TunnelServer — 에이전트 연결 수신 + 세션 ID 발급 + 세션 맵 관리 | 서버 측에서 어떤 에이전트가 연결되어 있는지 추적. 외부 요청이 들어오면 올바른 에이전트 터널로 전달 |
 | 6-D | `feat/tunnel-forward` | 외부 클라이언트 요청 → 터널 역방향 포워딩 | 실제 데이터 흐름 완성. 외부→서버→터널→에이전트→내부서버 경로 구현 |
 
@@ -135,6 +136,18 @@ PR을 올린 뒤 다음 Phase 작업을 이어서 시작하지 않는다.
 | 12-A | `build/dockerfile` | Dockerfile (서버용 / 에이전트용 분리) | 환경에 무관하게 동일하게 배포. 서버와 에이전트는 역할이 달라 이미지를 분리 |
 | 12-B | `build/systemd` | systemd 서비스 파일 (자동 시작 / 재시작 정책) | 리눅스 서버에서 프로세스를 데몬으로 관리. 서버 재부팅 후 자동 복구 |
 | 12-C | `build/compose` | docker-compose (서버 + 게이트웨이 + 설정 볼륨) | 서버/게이트웨이를 한 번에 올리는 로컬 개발 및 배포 환경 구성 |
+
+### Phase 13 — webkit headless 스트리밍 (Remote Browser Isolation)
+
+Guacamole는 VNC/RDP/SSH만 지원한다. HTTPS 웹페이지에 원격 접근하려면 서버에서 headless 브라우저가 페이지를 렌더링하고, 그 결과를 WebSocket으로 클라이언트에 스트리밍해야 한다.
+사용자는 브라우저에서 WSS:443으로 접속해 서버 측 headless 브라우저를 제어한다.
+
+| 세션 | 브랜치 | 작업 | 왜 필요한가 |
+|------|--------|------|-------------|
+| 13-A | `feat/webkit-headless` | libwebkit2gtk 또는 Chromium headless 연동 + 페이지 로드 | Guacamole가 지원 못하는 HTTPS 웹 원격 접근. 폐쇄망 내부 웹 서비스를 외부 브라우저에서 사용 가능하게 함 |
+| 13-B | `feat/webkit-capture` | 화면 캡처 (픽셀 버퍼) + 입력 이벤트 주입 (키보드/마우스) | 렌더링 결과를 클라이언트로 보내고 사용자 입력을 headless 브라우저로 전달. 양방향 제어 |
+| 13-C | `feat/webkit-stream` | WebSocket 전송 + 프레임 압축 (PNG/JPEG delta) | 매 프레임 전체를 보내면 대역폭 낭비. 변경된 영역(delta)만 압축 전송해 실시간성 확보 |
+| 13-D | `test/webkit-e2e` | 웹 클라이언트 ↔ WebSocket ↔ headless 브라우저 E2E 테스트 | 실제 웹 페이지 로드 → 렌더링 → 스트리밍 → 클라이언트 수신 전 구간 검증 |
 
 ---
 

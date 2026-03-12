@@ -19,7 +19,7 @@ namespace proxy {
  *              Zero Trust 모델: 네트워크 위치와 무관하게
  *              "올바른 인증서를 가진 주체"만 연결 허용
  *
- *   OtoRAS 맥락:
+ *   엔진 맥락:
  *     TunnelAgent가 TunnelServer에 연결할 때 서버는 에이전트의 인증서를 검증.
  *     등록된 CA가 서명한 인증서 없이는 연결을 거부 → 무단 에이전트 차단.
  *
