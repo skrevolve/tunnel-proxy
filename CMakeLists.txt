@@ -99,6 +99,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libssh2)
 
+# LibVNCServer 0.9.14 (Phase 8-D: VNC 클라이언트)
+# ── SASL은 optional — 시스템에 없으면 자동 스킵 ──
+set(WITH_JPEG         OFF CACHE BOOL "" FORCE)
+set(WITH_PNG          OFF CACHE BOOL "" FORCE)
+set(WITH_GCRYPT       OFF CACHE BOOL "" FORCE)
+set(WITH_GNUTLS       OFF CACHE BOOL "" FORCE)
+set(WITH_SDL          OFF CACHE BOOL "" FORCE)
+set(WITH_GTK          OFF CACHE BOOL "" FORCE)
+set(WITH_FFMPEG       OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libvncserver
+    URL https://github.com/LibVNC/libvncserver/archive/refs/tags/LibVNCServer-0.9.14.tar.gz
+)
+FetchContent_MakeAvailable(libvncserver)
+
 # 소스 파일 목록
 set(SOURCES
     src/main.cpp
@@ -115,6 +130,7 @@ set(SOURCES
     src/guac_parser.cpp
     src/guac_rdp.cpp
     src/guac_ssh.cpp
+    src/guac_vnc.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
@@ -131,6 +147,8 @@ target_include_directories(proxy SYSTEM PRIVATE
     ${freerdp_SOURCE_DIR}/winpr/include
     ${freerdp_BINARY_DIR}/winpr/include
     ${libssh2_SOURCE_DIR}/include
+    ${libvncserver_SOURCE_DIR}
+    ${libvncserver_BINARY_DIR}
 )
 
 # 라이브러리 링크
@@ -138,7 +156,8 @@ target_link_libraries(proxy
     freerdp          # FreeRDP 코어 + GDI (Phase 8-B)
     winpr            # WinPR — FreeRDP의 Windows 이식성 레이어
     libssh2_static   # SSH 클라이언트 (Phase 8-C)
-    ZLIB::ZLIB       # PNG 인코딩 (Phase 8-B)
+    vncclient        # VNC 클라이언트 (Phase 8-D)
+    ZLIB::ZLIB       # PNG 인코딩 (Phase 8-B/D)
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
