@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <csignal>
 #include <openssl/evp.h>
 
 #include <thread>
@@ -320,6 +321,7 @@ static std::string ws_recv_text(int fd, int timeout_sec = 3) {
 // ServerInit 수신 후 GuacVncClient는 "size" instruction을 콜백으로 전달해야 한다.
 // args[0]="0", args[1]=너비 문자열, args[2]=높이 문자열.
 TEST(GuacVncClientProtocol, ConnectMockServer_ReceivesSizeInstruction) {
+    signal(SIGPIPE, SIG_IGN);
     MockVncServer server;
     InstrCollector collector;
 
@@ -350,6 +352,7 @@ TEST(GuacVncClientProtocol, ConnectMockServer_ReceivesSizeInstruction) {
 // mock 서버가 Raw encoding FramebufferUpdate를 보내면
 // GuacVncClient는 img → blob... → end GuacInstruction 시퀀스를 전달해야 한다.
 TEST(GuacVncClientProtocol, FramebufferUpdate_ReceivesImgBlobEndSequence) {
+    signal(SIGPIPE, SIG_IGN);
     MockVncServer server;
     InstrCollector collector;
 
@@ -368,6 +371,7 @@ TEST(GuacVncClientProtocol, FramebufferUpdate_ReceivesImgBlobEndSequence) {
 //
 // disconnect() 호출 후 반드시 is_connected()가 false를 반환해야 한다.
 TEST(GuacVncClientProtocol, Disconnect_IsConnectedFalse) {
+    signal(SIGPIPE, SIG_IGN);
     MockVncServer server;
     InstrCollector collector;
 
