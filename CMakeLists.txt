@@ -88,6 +88,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(FreeRDP)
 
+# libssh2 1.11.1 (Phase 8-C: SSH 클라이언트)
+# 1.11.0에는 FetchContent 호환 버그(CMAKE_SOURCE_DIR vs CMAKE_CURRENT_SOURCE_DIR)가 있어 1.11.1 사용
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING     OFF CACHE BOOL "" FORCE)
+set(LIBSSH2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libssh2
+    URL https://github.com/libssh2/libssh2/releases/download/libssh2-1.11.1/libssh2-1.11.1.tar.gz
+)
+FetchContent_MakeAvailable(libssh2)
+
 # 소스 파일 목록
 set(SOURCES
     src/main.cpp
@@ -103,6 +114,7 @@ set(SOURCES
     src/access_policy.cpp
     src/guac_parser.cpp
     src/guac_rdp.cpp
+    src/guac_ssh.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
 )
@@ -118,12 +130,14 @@ target_include_directories(proxy SYSTEM PRIVATE
     ${freerdp_BINARY_DIR}/include
     ${freerdp_SOURCE_DIR}/winpr/include
     ${freerdp_BINARY_DIR}/winpr/include
+    ${libssh2_SOURCE_DIR}/include
 )
 
 # 라이브러리 링크
 target_link_libraries(proxy
     freerdp          # FreeRDP 코어 + GDI (Phase 8-B)
     winpr            # WinPR — FreeRDP의 Windows 이식성 레이어
+    libssh2_static   # SSH 클라이언트 (Phase 8-C)
     ZLIB::ZLIB       # PNG 인코딩 (Phase 8-B)
     OpenSSL::SSL
     OpenSSL::Crypto
