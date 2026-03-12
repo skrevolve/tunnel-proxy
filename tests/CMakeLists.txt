@@ -100,3 +100,40 @@ target_link_libraries(test_phase7
     pthread
 )
 gtest_discover_tests(test_phase7 PROPERTIES LABELS "phase7")
+
+# ─────────────────────────────────────────
+# Phase 8 테스트 (Guacamole 프로토콜)
+# ─────────────────────────────────────────
+add_executable(test_phase8
+    phase8/test_guac_parser.cpp
+    phase8/test_guac_protocol.cpp
+    ../src/guac_parser.cpp
+    ../src/guac_rdp.cpp
+    ../src/guac_ssh.cpp
+    ../src/guac_vnc.cpp
+    ../src/guac_websocket.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase8 SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/winpr/include
+    ${libssh2_SOURCE_DIR}/include
+    ${libvncserver_SOURCE_DIR}
+    ${libvncserver_BINARY_DIR}
+)
+target_link_libraries(test_phase8
+    GTest::gtest_main
+    freerdp
+    winpr
+    libssh2_static
+    vncclient
+    ZLIB::ZLIB
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(test_phase8 PROPERTIES LABELS "phase8")

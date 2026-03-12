@@ -18,7 +18,14 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake g++ libssl-dev zlib1g-dev
+          sudo apt-get install -y -q cmake g++ libssl-dev zlib1g-dev openssh-server
+
+      - name: Configure SSH test server
+        run: |
+          echo "runner:testpass" | sudo chpasswd
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
+          sudo service ssh start || sudo systemctl start ssh || true
 
       - name: Cache CMake build
         uses: actions/cache@v4
