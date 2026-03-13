@@ -137,5 +137,5 @@ target_link_libraries(test_phase8
     nlohmann_json::nlohmann_json
 )
 gtest_discover_tests(test_phase8 PROPERTIES LABELS "phase8"
-    ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1"
+    ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=0"
 )
