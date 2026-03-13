@@ -340,7 +340,8 @@ void GuacVncClient::run_event_loop(const std::string& host, uint16_t port,
 
     // ── 3. 서버 주소 설정 ─────────────────────────────────────────────────
     // rfbInitClient()에 argv를 넘기는 대신 구조체 필드를 직접 설정한다.
-    // serverHost는 strdup된 포인터를 기대하므로 strdup 사용.
+    // rfbGetClient()이 strdup("")로 초기화하므로 덮어쓰기 전에 해제 필요.
+    free(rfb->serverHost);
     rfb->serverHost = strdup(host.c_str());
     rfb->serverPort = static_cast<int>(port);
 
@@ -371,6 +372,9 @@ void GuacVncClient::run_event_loop(const std::string& host, uint16_t port,
 
     // ── 6. 정리 ───────────────────────────────────────────────────────────
     connected_.store(false);
+    // rfbClientCleanup(0.9.14)은 frameBuffer를 해제하지 않으므로 직접 해제.
+    free(rfb->frameBuffer);
+    rfb->frameBuffer = nullptr;
     rfbClientCleanup(rfb);
     impl_->rfb = nullptr;
 }
