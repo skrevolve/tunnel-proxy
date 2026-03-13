@@ -22,9 +22,6 @@ jobs:
 
       - name: Configure SSH test server
         run: |
-          echo "runner:testpass" | sudo chpasswd
-          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
           sudo service ssh start || sudo systemctl start ssh || true
 
       - name: Cache CMake build

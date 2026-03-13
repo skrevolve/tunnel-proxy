@@ -92,6 +92,17 @@ public:
                  uint16_t cols = 80, uint16_t rows = 24);
 
     /**
+     * SSH 서버에 공개키 인증으로 연결한다.
+     *
+     * PAM 비밀번호 인증이 막혀 있는 환경(WSL 등)에서 사용한다.
+     * privkey_path + ".pub" 을 공개키 경로로 사용한다.
+     */
+    void connect_with_key(const std::string& host, uint16_t port,
+                          const std::string& username,
+                          const std::string& privkey_path,
+                          uint16_t cols = 80, uint16_t rows = 24);
+
+    /**
      * SSH 연결을 종료한다.
      *
      * 채널 EOF를 보내고 worker_ 스레드가 끝날 때까지 블로킹 대기.
@@ -134,6 +145,11 @@ private:
                         const std::string& username,
                         const std::string& password,
                         uint16_t cols, uint16_t rows);
+
+    void run_event_loop_key(const std::string& host, uint16_t port,
+                             const std::string& username,
+                             const std::string& privkey_path,
+                             uint16_t cols, uint16_t rows);
 
     /**
      * flush_terminal_output — worker_ 루프에서 호출된다.
