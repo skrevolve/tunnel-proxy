@@ -21,6 +21,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <fstream>
 #include <pwd.h>
 
 using namespace proxy;
@@ -386,36 +387,77 @@ TEST(GuacVncClientProtocol, Disconnect_IsConnectedFalse) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// GuacSshClient — loopback sshd로 실제 연결 테스트
-// (CI에서 openssh-server + runner 계정 비밀번호 설정 필요)
+// GuacSshClient — loopback sshd로 실제 연결 테스트 (공개키 인증)
+//
+// PAM 패스워드 인증은 WSL 환경에서 작동하지 않는 경우가 많으므로
+// 임시 RSA 키쌍을 생성해 authorized_keys에 등록한 뒤 공개키 인증으로 연결한다.
 // ═════════════════════════════════════════════════════════════════════════════
+
+class SshKeyFixture : public ::testing::Test {
+protected:
+    std::string key_path_;
+    std::string user_;
+
+    void SetUp() override {
+        // sshd 가용성 확인
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in a{}; a.sin_family = AF_INET;
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+        a.sin_port = htons(22);
+        bool ok = (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0);
+        ::close(fd);
+        if (!ok) GTEST_SKIP() << "sshd not available on port 22";
+
+        const char* u = getenv("USER");
+        if (!u) { struct passwd* pw = getpwuid(getuid()); u = pw ? pw->pw_name : "runner"; }
+        user_ = u;
+
+        // 임시 키 생성
+        char tmpl[] = "/tmp/guac_ssh_test_XXXXXX";
+        int tmpfd = mkstemp(tmpl);
+        if (tmpfd < 0) { GTEST_SKIP() << "mkstemp failed"; return; }
+        ::close(tmpfd);
+        ::unlink(tmpl);
+        key_path_ = tmpl;
+
+        std::string cmd = "ssh-keygen -t rsa -b 2048 -N '' -f " + key_path_ + " -q 2>/dev/null";
+        if (system(cmd.c_str()) != 0) { GTEST_SKIP() << "ssh-keygen failed"; return; }
+
+        // authorized_keys에 추가
+        const char* home_env = getenv("HOME");
+        std::string home = home_env ? home_env : ("/home/" + user_);
+        std::string auth_dir  = home + "/.ssh";
+        std::string auth_file = auth_dir + "/authorized_keys";
+        system(("mkdir -p " + auth_dir + " && chmod 700 " + auth_dir).c_str());
+        system(("cat " + key_path_ + ".pub >> " + auth_file + " && chmod 600 " + auth_file).c_str());
+    }
+
+    void TearDown() override {
+        if (key_path_.empty()) return;
+        const char* home_env = getenv("HOME");
+        std::string home = home_env ? home_env : ("/home/" + user_);
+        std::string auth_file = home + "/.ssh/authorized_keys";
+        std::string tmp = auth_file + ".tmp";
+        // 공개키의 key 부분(두 번째 토큰)으로 해당 라인 제거
+        std::string cmd = "grep -vF \"$(awk '{print $2}' " + key_path_ + ".pub)\" "
+                          + auth_file + " > " + tmp
+                          + " && mv " + tmp + " " + auth_file + " 2>/dev/null || true";
+        system(cmd.c_str());
+        ::unlink(key_path_.c_str());
+        ::unlink((key_path_ + ".pub").c_str());
+    }
+};
 
 // ── 시나리오 16: SSH 연결 → size + pipe instruction 수신 ─────────────────────
 //
 // SSH 셸 세션이 수립되면 GuacSshClient는 size → pipe 순서로 instruction을 전달한다.
-TEST(GuacSshClientProtocol, ConnectLocalSshd_ReceivesSizeAndPipe) {
-    // sshd 가용성 확인
-    int check = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    addr.sin_port = htons(22);
-    if (connect(check, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(check);
-        GTEST_SKIP() << "sshd not available on port 22";
-    }
-    close(check);
-
-    const char* user = getenv("USER");
-    if (!user) { struct passwd* pw = getpwuid(getuid()); user = pw ? pw->pw_name : "runner"; }
-
+TEST_F(SshKeyFixture, ConnectLocalSshd_ReceivesSizeAndPipe) {
     InstrCollector collector;
     GuacSshClient client(collector.make_callback());
-    client.connect("127.0.0.1", 22, user, "testpass");
+    client.connect_with_key("127.0.0.1", 22, user_, key_path_);
 
     EXPECT_TRUE(collector.wait_for_opcode("pipe", std::chrono::seconds(10)));
 
-    // pipe 수신 전에 size도 수신되었는지 확인
     bool has_size = false;
     {
         std::lock_guard<std::mutex> lock(collector.mtx);
@@ -430,29 +472,13 @@ TEST(GuacSshClientProtocol, ConnectLocalSshd_ReceivesSizeAndPipe) {
 // ── 시나리오 17: send_input() 후 blob instruction 수신 ───────────────────────
 //
 // 키보드 입력(echo 명령)을 보내면 터미널 출력이 blob instruction으로 반환되어야 한다.
-TEST(GuacSshClientProtocol, SendInput_ReceivesBlobInstruction) {
-    int check = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    addr.sin_port = htons(22);
-    if (connect(check, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(check);
-        GTEST_SKIP() << "sshd not available on port 22";
-    }
-    close(check);
-
-    const char* user = getenv("USER");
-    if (!user) { struct passwd* pw = getpwuid(getuid()); user = pw ? pw->pw_name : "runner"; }
-
+TEST_F(SshKeyFixture, SendInput_ReceivesBlobInstruction) {
     InstrCollector collector;
     GuacSshClient client(collector.make_callback());
-    client.connect("127.0.0.1", 22, user, "testpass");
+    client.connect_with_key("127.0.0.1", 22, user_, key_path_);
 
-    // 셸이 준비될 때까지 대기
     ASSERT_TRUE(collector.wait_for_opcode("pipe", std::chrono::seconds(10)));
 
-    // 명령 입력
     client.send_input("echo guac_ssh_test\n");
     EXPECT_TRUE(collector.wait_for_opcode("blob", std::chrono::seconds(5)));
 
@@ -460,24 +486,11 @@ TEST(GuacSshClientProtocol, SendInput_ReceivesBlobInstruction) {
 }
 
 // ── 시나리오 18: disconnect() → end instruction 수신, is_connected() false ────
-TEST(GuacSshClientProtocol, Disconnect_ReceivesEndAndIsConnectedFalse) {
-    int check = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    addr.sin_port = htons(22);
-    if (connect(check, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(check);
-        GTEST_SKIP() << "sshd not available on port 22";
-    }
-    close(check);
-
-    const char* user = getenv("USER");
-    if (!user) { struct passwd* pw = getpwuid(getuid()); user = pw ? pw->pw_name : "runner"; }
-
+TEST_F(SshKeyFixture, Disconnect_ReceivesEndAndIsConnectedFalse) {
     InstrCollector collector;
     GuacSshClient client(collector.make_callback());
-    client.connect("127.0.0.1", 22, user, "testpass");
+    client.connect_with_key("127.0.0.1", 22, user_, key_path_);
+
     ASSERT_TRUE(collector.wait_for_opcode("pipe", std::chrono::seconds(10)));
 
     client.disconnect();

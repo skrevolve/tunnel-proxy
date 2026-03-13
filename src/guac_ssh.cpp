@@ -45,6 +45,15 @@ void GuacSshClient::connect(const std::string& host, uint16_t port,
                           host, port, username, password, cols, rows);
 }
 
+void GuacSshClient::connect_with_key(const std::string& host, uint16_t port,
+                                      const std::string& username,
+                                      const std::string& privkey_path,
+                                      uint16_t cols, uint16_t rows)
+{
+    worker_ = std::thread(&GuacSshClient::run_event_loop_key, this,
+                          host, port, username, privkey_path, cols, rows);
+}
+
 void GuacSshClient::disconnect() {
     if (impl_) {
         impl_->stop = true;
@@ -301,6 +310,104 @@ void GuacSshClient::run_event_loop(const std::string& host, uint16_t port,
     ::close(impl_->sock);
     impl_->sock = -1;
 
+    libssh2_exit();
+}
+
+// ── run_event_loop_key ─────────────────────────────────────────────────────────
+// connect()와 동일하나 인증을 libssh2_userauth_publickey_fromfile()로 수행한다.
+
+void GuacSshClient::run_event_loop_key(const std::string& host, uint16_t port,
+                                        const std::string& username,
+                                        const std::string& privkey_path,
+                                        uint16_t cols, uint16_t rows)
+{
+    if (libssh2_init(0) != 0) return;
+
+    try { impl_->sock = tcp_connect(host, port); }
+    catch (...) { libssh2_exit(); return; }
+
+    impl_->session = libssh2_session_init();
+    if (!impl_->session) {
+        ::close(impl_->sock); impl_->sock = -1;
+        libssh2_exit(); return;
+    }
+    libssh2_session_set_blocking(impl_->session, 1);
+
+    if (libssh2_session_handshake(impl_->session, impl_->sock) != 0) {
+        libssh2_session_free(impl_->session); impl_->session = nullptr;
+        ::close(impl_->sock); impl_->sock = -1;
+        libssh2_exit(); return;
+    }
+
+    std::string pubkey_path = privkey_path + ".pub";
+    if (libssh2_userauth_publickey_fromfile(
+            impl_->session,
+            username.c_str(),
+            pubkey_path.c_str(),
+            privkey_path.c_str(),
+            nullptr) != 0)
+    {
+        libssh2_session_disconnect(impl_->session, "auth failed");
+        libssh2_session_free(impl_->session); impl_->session = nullptr;
+        ::close(impl_->sock); impl_->sock = -1;
+        libssh2_exit(); return;
+    }
+
+    LIBSSH2_CHANNEL* ch = libssh2_channel_open_session(impl_->session);
+    if (!ch) {
+        libssh2_session_disconnect(impl_->session, "channel open failed");
+        libssh2_session_free(impl_->session); impl_->session = nullptr;
+        ::close(impl_->sock); impl_->sock = -1;
+        libssh2_exit(); return;
+    }
+
+    if (libssh2_channel_request_pty_ex(ch, "xterm", 5, nullptr, 0,
+                                        cols, rows, 0, 0) != 0) {
+        libssh2_channel_free(ch);
+        libssh2_session_disconnect(impl_->session, "pty failed");
+        libssh2_session_free(impl_->session); impl_->session = nullptr;
+        ::close(impl_->sock); impl_->sock = -1;
+        libssh2_exit(); return;
+    }
+
+    if (libssh2_channel_shell(ch) != 0) {
+        libssh2_channel_free(ch);
+        libssh2_session_disconnect(impl_->session, "shell failed");
+        libssh2_session_free(impl_->session); impl_->session = nullptr;
+        ::close(impl_->sock); impl_->sock = -1;
+        libssh2_exit(); return;
+    }
+
+    { std::lock_guard<std::mutex> lock(channel_mutex_); impl_->channel = ch; }
+    connected_.store(true);
+
+    { GuacInstruction s; s.opcode="size";
+      s.args={std::to_string(stream_id_),std::to_string(cols),std::to_string(rows)};
+      callback_(s); }
+    { GuacInstruction p; p.opcode="pipe";
+      p.args={std::to_string(stream_id_),"terminal","text/plain"};
+      callback_(p); }
+
+    char buf[4096];
+    while (!impl_->stop.load()) {
+        ssize_t n = libssh2_channel_read(ch, buf, sizeof(buf));
+        if (n == LIBSSH2_ERROR_EAGAIN) continue;
+        if (n <= 0) break;
+        flush_terminal_output(buf, static_cast<size_t>(n));
+    }
+
+    connected_.store(false);
+    { GuacInstruction e; e.opcode="end"; e.args={std::to_string(stream_id_)}; callback_(e); }
+
+    { std::lock_guard<std::mutex> lock(channel_mutex_);
+      libssh2_channel_send_eof(ch);
+      libssh2_channel_close(ch);
+      libssh2_channel_free(ch);
+      impl_->channel = nullptr; }
+
+    libssh2_session_disconnect(impl_->session, "Normal Shutdown");
+    libssh2_session_free(impl_->session); impl_->session = nullptr;
+    ::close(impl_->sock); impl_->sock = -1;
     libssh2_exit();
 }
 
