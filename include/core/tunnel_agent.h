@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tunnel_protocol.h"
+#include "core/tunnel_metrics.h"
 
 #include <string>
 #include <atomic>
@@ -111,6 +112,9 @@ public:
      * 재연결 대기 중에는 1~MAX_RECONNECT_DELAY_S 값.
      */
     int current_reconnect_delay() const;
+
+    /** 수집된 메트릭 반환 */
+    const TunnelMetrics& get_metrics() const { return metrics_; }
 
 private:
     /**
@@ -268,8 +272,11 @@ private:
      */
     std::atomic<int> current_reconnect_delay_{0};
 
+    TunnelMetrics metrics_;
+
     std::mutex send_mutex_;             // server_fd 쓰기 직렬화
     mutable std::mutex sessions_mutex_; // sessions_ 맵 보호
+    std::mutex cleanup_mutex_;          // cleanup_connection() 중복 호출 방지
 
     std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_;
     std::thread heartbeat_thread_;

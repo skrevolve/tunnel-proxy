@@ -43,14 +43,22 @@ void TunnelAgent::run() {
     running_ = true;
     int delay_s = 1;
 
+    bool first_attempt = true;
     while (running_) {
+        if (!first_attempt) {
+            metrics_.record_reconnect();
+        }
+
         try {
             connect_and_run();
+            first_attempt = true;  // 정상 연결 후 리셋
         } catch (const std::exception& e) {
             if (!running_) break;
             Logger::warning("[agent] connection error: " +
                             std::string(e.what()));
         }
+
+        first_attempt = false;
 
         if (!running_) break;
 
@@ -71,7 +79,15 @@ void TunnelAgent::run() {
 }
 
 void TunnelAgent::connect_and_run() {
-    server_fd_ = connect_to_server();
+    metrics_.record_connection_attempt();
+
+    try {
+        server_fd_ = connect_to_server();
+    } catch (...) {
+        metrics_.record_connection_failure();
+        throw;
+    }
+
     Logger::info("[agent] connected to server " + server_ip_ + ":" +
                  std::to_string(server_port_));
 
@@ -84,9 +100,11 @@ void TunnelAgent::connect_and_run() {
         resp.type != TunnelMsgType::HELLO_ACK) {
         close(server_fd_);
         server_fd_ = -1;
+        metrics_.record_connection_failure();
         throw std::runtime_error("tunnel agent: HELLO_ACK not received");
     }
     Logger::info("[agent] received HELLO_ACK — registered");
+    metrics_.record_connection_success();
 
     // ── HEARTBEAT 스레드 시작 ───────────────────────────────────────────────
     // last_ack_ns_ 초기화: 연결 직후를 기준으로 타임아웃 카운트 시작
@@ -139,6 +157,10 @@ void TunnelAgent::stop() {
 }
 
 void TunnelAgent::cleanup_connection() {
+    // stop()과 connect_and_run() 양쪽에서 호출될 수 있으므로 뮤텍스로 보호.
+    // 두 번째 진입 시 모든 자원이 이미 정리된 상태 → joinable()/fd 체크로 건너뜀.
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
     // 모든 세션 target_fd 닫기 → per-session 스레드 종료 유도
     std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_copy;
     {
@@ -281,10 +303,15 @@ void TunnelAgent::send_frame(const TunnelFrame& frame) {
         ssize_t s = send(server_fd_, buf.data() + sent,
                          buf.size() - sent, MSG_NOSIGNAL);
         if (s <= 0) {
+            metrics_.record_error();
             throw std::runtime_error(
                 "tunnel agent: send failed: " + std::string(strerror(errno)));
         }
         sent += static_cast<size_t>(s);
+    }
+    // DATA 프레임만 bytes_sent 계상 (프로토콜 오버헤드 제외)
+    if (frame.type == TunnelMsgType::DATA) {
+        metrics_.record_bytes_sent(frame.payload.size());
     }
 }
 
@@ -356,11 +383,13 @@ void TunnelAgent::handle_data(const TunnelFrame& frame) {
         if (s <= 0) {
             Logger::warning("[agent] write to target failed, closing session " +
                             std::to_string(frame.session_id));
+            metrics_.record_error();
             close_session(frame.session_id);
             return;
         }
         sent += static_cast<size_t>(s);
     }
+    metrics_.record_bytes_received(frame.payload.size());
 }
 
 void TunnelAgent::handle_close(const TunnelFrame& frame) {
