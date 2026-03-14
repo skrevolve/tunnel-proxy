@@ -41,7 +41,36 @@ TunnelAgent::~TunnelAgent() {
 
 void TunnelAgent::run() {
     running_ = true;
+    int delay_s = 1;
 
+    while (running_) {
+        try {
+            connect_and_run();
+        } catch (const std::exception& e) {
+            if (!running_) break;
+            Logger::warning("[agent] connection error: " +
+                            std::string(e.what()));
+        }
+
+        if (!running_) break;
+
+        // 지수 백오프 대기: 1s → 2s → 4s → ... → MAX_RECONNECT_DELAY_S(60s)
+        Logger::info("[agent] reconnecting in " +
+                     std::to_string(delay_s) + "s ...");
+        current_reconnect_delay_.store(delay_s);
+
+        for (int i = 0; i < delay_s && running_; ++i) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+
+        delay_s = std::min(delay_s * 2, MAX_RECONNECT_DELAY_S);
+    }
+
+    current_reconnect_delay_.store(0);
+    Logger::info("[agent] stopped");
+}
+
+void TunnelAgent::connect_and_run() {
     server_fd_ = connect_to_server();
     Logger::info("[agent] connected to server " + server_ip_ + ":" +
                  std::to_string(server_port_));
@@ -55,7 +84,6 @@ void TunnelAgent::run() {
         resp.type != TunnelMsgType::HELLO_ACK) {
         close(server_fd_);
         server_fd_ = -1;
-        running_   = false;
         throw std::runtime_error("tunnel agent: HELLO_ACK not received");
     }
     Logger::info("[agent] received HELLO_ACK — registered");
@@ -92,7 +120,8 @@ void TunnelAgent::run() {
     }
 
     Logger::info("[agent] server connection closed");
-    stop();
+    cleanup_connection();
+    // 재연결 대기 후 run()이 다시 connect_and_run()을 호출
 }
 
 void TunnelAgent::stop() {
@@ -101,11 +130,15 @@ void TunnelAgent::stop() {
         return;  // 이미 중지됨
     }
 
-    // server_fd shutdown → main thread recv_frame 탈출
+    // server_fd shutdown → recv_frame 탈출 + 재연결 백오프 루프 깨우기
     if (server_fd_ >= 0) {
         shutdown(server_fd_, SHUT_RDWR);
     }
 
+    cleanup_connection();
+}
+
+void TunnelAgent::cleanup_connection() {
     // 모든 세션 target_fd 닫기 → per-session 스레드 종료 유도
     std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_copy;
     {
@@ -119,8 +152,6 @@ void TunnelAgent::stop() {
             close(session->target_fd);
             session->target_fd = -1;
         }
-        // per-session 스레드는 곧 EOF를 감지하고 종료.
-        // 단, 이미 detach()된 경우 joinable()이 false.
         if (session->reader.joinable()) {
             session->reader.detach();
         }
@@ -147,6 +178,10 @@ int64_t TunnelAgent::seconds_since_last_ack() const {
     if (last == 0) return 0;
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     return (now - last) / 1'000'000'000LL;
+}
+
+int TunnelAgent::current_reconnect_delay() const {
+    return current_reconnect_delay_.load();
 }
 
 // ── 네트워크 유틸리티 ───────────────────────────────────────────────────────
@@ -414,9 +449,13 @@ void TunnelAgent::heartbeat_loop() {
         if (last > 0 && (now - last) > timeout_ns) {
             Logger::warning("[agent] HEARTBEAT_ACK timeout (" +
                             std::to_string(heartbeat_timeout_s_) +
-                            "s) — connection dead, stopping");
-            stop();
-            return;
+                            "s) — disconnecting for reconnect");
+            // stop()을 호출하지 않음: running_=true 유지 → run()이 재연결
+            // server_fd_ shutdown → recv_frame 탈출 → cleanup_connection() 호출
+            if (server_fd_ >= 0) {
+                shutdown(server_fd_, SHUT_RDWR);
+            }
+            return;  // heartbeat 스레드 종료 → cleanup_connection()이 join
         }
 
         if (elapsed < heartbeat_interval_s_) continue;

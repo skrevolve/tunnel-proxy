@@ -78,8 +78,9 @@ public:
     /**
      * 서버 연결 → HELLO 교환 → 이벤트 루프 진입 (블로킹)
      *
-     * 연결 실패, HELLO_ACK 미수신, 서버 연결 종료 시 예외 또는 정상 반환.
-     * 재연결 로직은 Phase 11-B에서 추가 예정.
+     * 연결 실패 또는 단절 시 지수 백오프로 자동 재연결.
+     *   1s → 2s → 4s → 8s → ... → MAX_RECONNECT_DELAY_S(60s) 반복.
+     * stop() 호출 시에만 루프 탈출.
      */
     void run();
 
@@ -99,9 +100,17 @@ public:
      * 마지막 HEARTBEAT_ACK 이후 경과 시간 (초) 반환
      *
      * run() 호출 전에는 0 반환.
-     * 타임아웃 감지 여부를 외부에서 확인할 때 사용 (테스트 / Phase 11-B 재연결).
+     * 타임아웃 감지 여부를 외부에서 확인할 때 사용.
      */
     int64_t seconds_since_last_ack() const;
+
+    /**
+     * 현재 재연결 대기 중인 지수 백오프 딜레이 (초) 반환
+     *
+     * 연결 중이거나 run() 미호출 시 0.
+     * 재연결 대기 중에는 1~MAX_RECONNECT_DELAY_S 값.
+     */
+    int current_reconnect_delay() const;
 
 private:
     /**
@@ -159,6 +168,28 @@ private:
 
     // ── 프레임 핸들러 ─────────────────────────────────────────────────────────
 
+    /**
+     * 단일 연결 수명 처리 (connect → HELLO → 이벤트 루프 → 종료)
+     *
+     * run()의 재연결 루프 안에서 호출.
+     * 연결 실패 시 std::exception 던짐 → run()이 백오프 후 재시도.
+     * 연결 종료(정상/비정상) 시 cleanup_connection() 호출 후 반환.
+     * running_ 값을 변경하지 않는다.
+     */
+    void connect_and_run();
+
+    /**
+     * 현재 연결 자원 정리 (running_ 변경 없음)
+     *
+     * - sessions_: 모든 세션 target_fd 닫기, reader 스레드 detach
+     * - heartbeat_thread_: join
+     * - server_fd_: close
+     *
+     * stop()과 connect_and_run() 양쪽에서 호출.
+     * 멱등: 이미 닫힌 fd는 건너뜀.
+     */
+    void cleanup_connection();
+
     /// OPEN: 내부 타겟 연결 + 세션 생성 + OPEN_ACK 송신
     void handle_open(const TunnelFrame& frame);
 
@@ -205,6 +236,9 @@ private:
 
     // ── 멤버 변수 ─────────────────────────────────────────────────────────────
 
+    /// 지수 백오프 최대 대기 시간 (초)
+    static constexpr int MAX_RECONNECT_DELAY_S = 60;
+
     std::string server_ip_;
     int         server_port_;
     std::string agent_id_;
@@ -217,7 +251,7 @@ private:
     /**
      * 마지막 HEARTBEAT_ACK 수신 시각 (nanoseconds since steady_clock epoch)
      *
-     * run() 시작 시 현재 시각으로 초기화.
+     * connect_and_run() 시작 시 현재 시각으로 초기화.
      * HEARTBEAT_ACK 수신 시 갱신.
      * heartbeat_loop()에서 타임아웃 계산에 사용.
      *
@@ -225,6 +259,14 @@ private:
      * 0 = 미초기화 (run() 전).
      */
     std::atomic<int64_t> last_ack_ns_{0};
+
+    /**
+     * 현재 재연결 백오프 딜레이 (초)
+     *
+     * 연결 중 또는 run() 미호출: 0
+     * 재연결 대기 중: 1 ~ MAX_RECONNECT_DELAY_S
+     */
+    std::atomic<int> current_reconnect_delay_{0};
 
     std::mutex send_mutex_;             // server_fd 쓰기 직렬화
     mutable std::mutex sessions_mutex_; // sessions_ 맵 보호
