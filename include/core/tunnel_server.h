@@ -4,6 +4,7 @@
 
 #include <string>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <unordered_map>
 #include <memory>
@@ -71,10 +72,14 @@ namespace proxy {
 class TunnelServer {
 public:
     /**
-     * @param agent_port   에이전트 역방향 연결 수신 포트 (기본값 9900)
-     * @param proxy_port   외부 클라이언트 연결 수신 포트 (0이면 비활성)
+     * @param agent_port      에이전트 역방향 연결 수신 포트 (기본값 9900)
+     * @param proxy_port      외부 클라이언트 연결 수신 포트 (0이면 비활성)
+     * @param agent_timeout_s 에이전트 heartbeat 타임아웃 (초).
+     *                        이 시간 동안 HEARTBEAT가 오지 않으면 연결 종료.
+     *                        0이면 watchdog 비활성.
      */
-    explicit TunnelServer(int agent_port = 9900, int proxy_port = 0);
+    explicit TunnelServer(int agent_port = 9900, int proxy_port = 0,
+                          int agent_timeout_s = 90);
     ~TunnelServer();
 
     /**
@@ -131,8 +136,16 @@ private:
         std::string agent_id;
         std::mutex  send_mutex;
 
-        AgentConn(int f, std::string id)
-            : fd(f), agent_id(std::move(id)) {}
+        /**
+         * 마지막 HEARTBEAT 수신 시각 (nanoseconds since steady_clock epoch)
+         *
+         * 에이전트 등록 시 현재 시각으로 초기화.
+         * HEARTBEAT 프레임 수신 시 갱신.
+         * watchdog_loop()에서 타임아웃 계산에 사용.
+         */
+        std::atomic<int64_t> last_heartbeat_ns;
+
+        AgentConn(int f, std::string id);
         ~AgentConn();
         AgentConn(const AgentConn&)            = delete;
         AgentConn& operator=(const AgentConn&) = delete;
@@ -183,6 +196,17 @@ private:
      */
     void proxy_accept_loop();
 
+    /**
+     * 에이전트 heartbeat 감시 스레드 함수
+     *
+     * 10초 간격으로 모든 에이전트의 last_heartbeat_ns를 확인.
+     * agent_timeout_s_ 초 이상 HEARTBEAT 미수신 시:
+     *   - 에이전트 fd shutdown → per-agent thread의 recv_frame 탈출 → unregister_agent 호출
+     *
+     * agent_timeout_s_ == 0이면 watchdog 비활성 (run()에서 스레드 미시작).
+     */
+    void watchdog_loop();
+
     void close_session(uint32_t session_id);
     uint32_t generate_session_id();
 
@@ -194,6 +218,7 @@ private:
 
     int agent_port_;
     int proxy_port_;
+    int agent_timeout_s_;
 
     int agent_listen_fd_{-1};
     int proxy_listen_fd_{-1};
@@ -202,6 +227,7 @@ private:
     std::atomic<uint32_t> next_session_id_{1};
 
     std::thread proxy_listener_thread_;
+    std::thread watchdog_thread_;
 
     mutable std::mutex agents_mutex_;
     std::unordered_map<std::string, std::shared_ptr<AgentConn>> agents_;

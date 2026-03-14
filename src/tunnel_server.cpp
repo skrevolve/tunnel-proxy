@@ -14,7 +14,12 @@
 
 namespace proxy {
 
-// ── AgentConn 소멸자 ────────────────────────────────────────────────────────
+// ── AgentConn 생성자 / 소멸자 ───────────────────────────────────────────────
+
+TunnelServer::AgentConn::AgentConn(int f, std::string id)
+    : fd(f), agent_id(std::move(id)),
+      last_heartbeat_ns(
+          std::chrono::steady_clock::now().time_since_epoch().count()) {}
 
 TunnelServer::AgentConn::~AgentConn() {
     if (fd >= 0) {
@@ -25,8 +30,9 @@ TunnelServer::AgentConn::~AgentConn() {
 
 // ── 생성자 / 소멸자 ─────────────────────────────────────────────────────────
 
-TunnelServer::TunnelServer(int agent_port, int proxy_port)
-    : agent_port_(agent_port), proxy_port_(proxy_port) {}
+TunnelServer::TunnelServer(int agent_port, int proxy_port, int agent_timeout_s)
+    : agent_port_(agent_port), proxy_port_(proxy_port),
+      agent_timeout_s_(agent_timeout_s) {}
 
 TunnelServer::~TunnelServer() {
     stop();
@@ -47,6 +53,13 @@ void TunnelServer::run() {
         proxy_listener_thread_ = std::thread(&TunnelServer::proxy_accept_loop, this);
         Logger::info("[server] listening for external clients on port " +
                      std::to_string(proxy_port_));
+    }
+
+    // watchdog 시작 (agent_timeout_s_ > 0인 경우)
+    if (agent_timeout_s_ > 0) {
+        watchdog_thread_ = std::thread(&TunnelServer::watchdog_loop, this);
+        Logger::info("[server] agent watchdog started (timeout=" +
+                     std::to_string(agent_timeout_s_) + "s)");
     }
 
     while (running_) {
@@ -98,6 +111,10 @@ void TunnelServer::stop() {
 
     if (proxy_listener_thread_.joinable()) {
         proxy_listener_thread_.join();
+    }
+
+    if (watchdog_thread_.joinable()) {
+        watchdog_thread_.join();
     }
 
     // pending OPEN_ACK 대기 스레드들에게 예외 신호
@@ -291,6 +308,15 @@ void TunnelServer::handle_agent_frame(const std::string& agent_id,
     case TunnelMsgType::HEARTBEAT: {
         Logger::info("[server] HEARTBEAT from " + agent_id +
                      " — sending ACK");
+        // last_heartbeat_ns 갱신 (watchdog 타임아웃 리셋)
+        {
+            std::lock_guard<std::mutex> lock(agents_mutex_);
+            auto it = agents_.find(agent_id);
+            if (it != agents_.end()) {
+                it->second->last_heartbeat_ns.store(
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+            }
+        }
         try {
             send_to_agent(agent_id, make_heartbeat_ack());
         } catch (const std::exception& e) {
@@ -475,6 +501,46 @@ void TunnelServer::send_to_agent(const std::string& agent_id,
         }
         sent += static_cast<size_t>(s);
     }
+}
+
+// ── Phase 11-A: 에이전트 heartbeat watchdog ─────────────────────────────────
+
+void TunnelServer::watchdog_loop() {
+    constexpr int CHECK_INTERVAL_S = 10;
+    const int64_t timeout_ns =
+        static_cast<int64_t>(agent_timeout_s_) * 1'000'000'000LL;
+
+    for (int elapsed = 0; running_; ++elapsed) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (elapsed < CHECK_INTERVAL_S) continue;
+        elapsed = 0;
+
+        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+
+        // 타임아웃 에이전트 fd 목록 수집
+        std::vector<std::pair<std::string, int>> timed_out;
+        {
+            std::lock_guard<std::mutex> lock(agents_mutex_);
+            for (auto& [id, conn] : agents_) {
+                int64_t last = conn->last_heartbeat_ns.load();
+                if ((now - last) > timeout_ns) {
+                    timed_out.emplace_back(id, conn->fd);
+                }
+            }
+        }
+
+        for (auto& [id, fd] : timed_out) {
+            Logger::warning("[server] agent " + id +
+                            " heartbeat timeout (" +
+                            std::to_string(agent_timeout_s_) +
+                            "s) — closing connection");
+            // fd shutdown → per-agent thread의 recv_frame 탈출 → unregister_agent 호출
+            if (fd >= 0) {
+                shutdown(fd, SHUT_RDWR);
+            }
+        }
+    }
+    Logger::info("[server] watchdog thread exited");
 }
 
 // ── Phase 6-D: 외부 클라이언트 포워딩 ──────────────────────────────────────
