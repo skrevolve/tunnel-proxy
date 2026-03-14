@@ -276,6 +276,7 @@ private:
 
     std::mutex send_mutex_;             // server_fd 쓰기 직렬화
     mutable std::mutex sessions_mutex_; // sessions_ 맵 보호
+    std::mutex cleanup_mutex_;          // cleanup_connection() 중복 호출 방지
 
     std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_;
     std::thread heartbeat_thread_;

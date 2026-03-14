@@ -157,6 +157,10 @@ void TunnelAgent::stop() {
 }
 
 void TunnelAgent::cleanup_connection() {
+    // stop()과 connect_and_run() 양쪽에서 호출될 수 있으므로 뮤텍스로 보호.
+    // 두 번째 진입 시 모든 자원이 이미 정리된 상태 → joinable()/fd 체크로 건너뜀.
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
     // 모든 세션 target_fd 닫기 → per-session 스레드 종료 유도
     std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_copy;
     {
