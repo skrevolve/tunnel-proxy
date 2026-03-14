@@ -25,9 +25,13 @@ TunnelAgent::Session::~Session() {
 
 TunnelAgent::TunnelAgent(const std::string& server_ip, int server_port,
                          const std::string& agent_id,
-                         int heartbeat_interval_s)
+                         int heartbeat_interval_s,
+                         int heartbeat_timeout_s)
     : server_ip_(server_ip), server_port_(server_port),
-      agent_id_(agent_id), heartbeat_interval_s_(heartbeat_interval_s) {}
+      agent_id_(agent_id), heartbeat_interval_s_(heartbeat_interval_s),
+      heartbeat_timeout_s_(heartbeat_timeout_s > 0
+                           ? heartbeat_timeout_s
+                           : heartbeat_interval_s * 3) {}
 
 TunnelAgent::~TunnelAgent() {
     stop();
@@ -57,6 +61,9 @@ void TunnelAgent::run() {
     Logger::info("[agent] received HELLO_ACK — registered");
 
     // ── HEARTBEAT 스레드 시작 ───────────────────────────────────────────────
+    // last_ack_ns_ 초기화: 연결 직후를 기준으로 타임아웃 카운트 시작
+    last_ack_ns_.store(
+        std::chrono::steady_clock::now().time_since_epoch().count());
     heartbeat_thread_ = std::thread(&TunnelAgent::heartbeat_loop, this);
 
     // ── 서버 프레임 수신 루프 ──────────────────────────────────────────────
@@ -73,7 +80,9 @@ void TunnelAgent::run() {
                 handle_close(frame);
                 break;
             case TunnelMsgType::HEARTBEAT_ACK:
-                // 수신 확인만 — Phase 11-A에서 타임아웃 감지 추가 예정
+                last_ack_ns_.store(
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+                Logger::info("[agent] HEARTBEAT_ACK received");
                 break;
             default:
                 Logger::warning("[agent] unexpected frame type: " +
@@ -131,6 +140,13 @@ void TunnelAgent::stop() {
 uint32_t TunnelAgent::get_active_sessions() const {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     return static_cast<uint32_t>(sessions_.size());
+}
+
+int64_t TunnelAgent::seconds_since_last_ack() const {
+    int64_t last = last_ack_ns_.load();
+    if (last == 0) return 0;
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return (now - last) / 1'000'000'000LL;
 }
 
 // ── 네트워크 유틸리티 ───────────────────────────────────────────────────────
@@ -385,9 +401,24 @@ void TunnelAgent::target_reader(uint32_t session_id, int target_fd) {
 }
 
 void TunnelAgent::heartbeat_loop() {
+    const int64_t timeout_ns =
+        static_cast<int64_t>(heartbeat_timeout_s_) * 1'000'000'000LL;
+
     // 1초 단위로 running_을 확인해 stop() 시 빠르게 종료
     for (int elapsed = 0; running_; ++elapsed) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        // 타임아웃 감지: 마지막 ACK 이후 경과 시간이 timeout_ns 초과 시 연결 종료
+        auto now  = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto last = last_ack_ns_.load();
+        if (last > 0 && (now - last) > timeout_ns) {
+            Logger::warning("[agent] HEARTBEAT_ACK timeout (" +
+                            std::to_string(heartbeat_timeout_s_) +
+                            "s) — connection dead, stopping");
+            stop();
+            return;
+        }
+
         if (elapsed < heartbeat_interval_s_) continue;
         elapsed = 0;
 

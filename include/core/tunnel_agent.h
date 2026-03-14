@@ -65,10 +65,13 @@ public:
      * @param server_port          서버 포트 번호
      * @param agent_id             에이전트 고유 식별자 (HELLO 프레임에 포함)
      * @param heartbeat_interval_s HEARTBEAT 송신 주기 (초). 기본값 30초.
+     * @param heartbeat_timeout_s  HEARTBEAT_ACK 무응답 타임아웃 (초).
+     *                             0이면 interval * 3 자동 설정.
      */
     TunnelAgent(const std::string& server_ip, int server_port,
                 const std::string& agent_id,
-                int heartbeat_interval_s = 30);
+                int heartbeat_interval_s = 30,
+                int heartbeat_timeout_s  = 0);
 
     ~TunnelAgent();
 
@@ -91,6 +94,14 @@ public:
 
     /// 현재 활성 세션 수 반환
     uint32_t get_active_sessions() const;
+
+    /**
+     * 마지막 HEARTBEAT_ACK 이후 경과 시간 (초) 반환
+     *
+     * run() 호출 전에는 0 반환.
+     * 타임아웃 감지 여부를 외부에서 확인할 때 사용 (테스트 / Phase 11-B 재연결).
+     */
+    int64_t seconds_since_last_ack() const;
 
 private:
     /**
@@ -198,9 +209,22 @@ private:
     int         server_port_;
     std::string agent_id_;
     int         heartbeat_interval_s_;
+    int         heartbeat_timeout_s_;
 
-    std::atomic<bool> running_{false};
-    int               server_fd_{-1};  // run() 실행 중에만 유효
+    std::atomic<bool>    running_{false};
+    int                  server_fd_{-1};  // run() 실행 중에만 유효
+
+    /**
+     * 마지막 HEARTBEAT_ACK 수신 시각 (nanoseconds since steady_clock epoch)
+     *
+     * run() 시작 시 현재 시각으로 초기화.
+     * HEARTBEAT_ACK 수신 시 갱신.
+     * heartbeat_loop()에서 타임아웃 계산에 사용.
+     *
+     * int64_t atomic: std::atomic<time_point>는 표준 미지원.
+     * 0 = 미초기화 (run() 전).
+     */
+    std::atomic<int64_t> last_ack_ns_{0};
 
     std::mutex send_mutex_;             // server_fd 쓰기 직렬화
     mutable std::mutex sessions_mutex_; // sessions_ 맵 보호
