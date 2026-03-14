@@ -139,3 +139,18 @@ target_link_libraries(test_phase8
 gtest_discover_tests(test_phase8 PROPERTIES LABELS "phase8"
     ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=0"
 )
+
+# ─────────────────────────────────────────
+# Phase 11 테스트 (재연결 및 안정성 — 메트릭)
+# ─────────────────────────────────────────
+add_executable(test_phase11
+    phase11/test_metrics.cpp
+    ../src/tunnel_metrics.cpp
+    ../src/tunnel_agent.cpp
+    ../src/tunnel_server.cpp
+    ../src/tunnel_protocol.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase11 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(test_phase11 GTest::gtest_main pthread)
+gtest_discover_tests(test_phase11 PROPERTIES LABELS "phase11")

@@ -122,6 +122,7 @@ set(SOURCES
     src/tls_proxy.cpp
     src/udp_proxy.cpp
     src/tunnel_protocol.cpp
+    src/tunnel_metrics.cpp
     src/tunnel_agent.cpp
     src/tunnel_server.cpp
     src/mtls_context.cpp

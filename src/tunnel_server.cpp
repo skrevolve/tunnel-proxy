@@ -263,6 +263,7 @@ void TunnelServer::handle_agent_connection(int agent_fd) {
     }
 
     Logger::info("[server] agent registered: " + agent_id);
+    metrics_.record_connection_attempt();
 
     // ── 에이전트 등록 ────────────────────────────────────────────────────────
     {
@@ -285,8 +286,11 @@ void TunnelServer::handle_agent_connection(int agent_fd) {
     try {
         send_to_agent(agent_id, make_hello_ack());
         Logger::info("[server] sent HELLO_ACK to " + agent_id);
+        metrics_.record_connection_success();
     } catch (const std::exception& e) {
         Logger::error("[server] send HELLO_ACK failed: " + std::string(e.what()));
+        metrics_.record_connection_failure();
+        metrics_.record_error();
         unregister_agent(agent_id);
         return;
     }
@@ -371,11 +375,13 @@ void TunnelServer::handle_agent_frame(const std::string& agent_id,
                 Logger::warning("[server] forward to external failed, "
                                 "closing session " +
                                 std::to_string(frame.session_id));
+                metrics_.record_error();
                 close_session(frame.session_id);
                 return;
             }
             sent += static_cast<size_t>(s);
         }
+        metrics_.record_bytes_received(frame.payload.size());
         break;
     }
 
@@ -495,11 +501,15 @@ void TunnelServer::send_to_agent(const std::string& agent_id,
         ssize_t s = send(conn->fd, buf.data() + sent,
                          buf.size() - sent, MSG_NOSIGNAL);
         if (s <= 0) {
+            metrics_.record_error();
             throw std::runtime_error(
                 "tunnel server: send to agent " + agent_id +
                 " failed: " + std::string(strerror(errno)));
         }
         sent += static_cast<size_t>(s);
+    }
+    if (frame.type == TunnelMsgType::DATA) {
+        metrics_.record_bytes_sent(frame.payload.size());
     }
 }
 

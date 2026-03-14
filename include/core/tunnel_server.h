@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tunnel_protocol.h"
+#include "core/tunnel_metrics.h"
 
 #include <string>
 #include <atomic>
@@ -128,6 +129,9 @@ public:
     uint32_t get_session_count() const;
     std::vector<std::string> get_agent_ids() const;
 
+    /** 수집된 메트릭 반환 */
+    const TunnelMetrics& get_metrics() const { return metrics_; }
+
 private:
     // ── 내부 자료구조 ─────────────────────────────────────────────────────────
 
@@ -249,6 +253,8 @@ private:
 
     /// OPEN_ACK 대기 최대 시간 (초)
     static constexpr int OPEN_ACK_TIMEOUT_S = 10;
+
+    TunnelMetrics metrics_;
 };
 
 } // namespace proxy
