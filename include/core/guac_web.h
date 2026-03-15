@@ -12,7 +12,7 @@ namespace proxy {
 
 /**
  * @file guac_web.h
- * @brief Phase 13-A/B — Chrome headless + CDP WebSocket + JPEG 스크린샷 스트리밍
+ * @brief Phase 13-A/B/C — Chrome headless + CDP + JPEG 스트리밍 + 마우스/키보드 입력
  *
  * ── 역할 ──────────────────────────────────────────────────────────────────
  *
@@ -23,6 +23,7 @@ namespace proxy {
  *   5. Page.loadEventFired 이벤트를 수신해 로드 완료를 확인한다
  *   6. Page.captureScreenshot 루프로 JPEG 스크린샷을 캡처한다       [Phase 13-B]
  *   7. JPEG를 Guacamole img/blob/end 명령어로 변환해 콜백으로 전달한다  [Phase 13-B]
+ *   8. 마우스/키보드 입력을 CDP Input 이벤트로 Chrome에 주입한다     [Phase 13-C]
  *
  * ── GuacVncClient와의 구조적 유사성 ──────────────────────────────────────
  *
@@ -59,6 +60,15 @@ namespace proxy {
  *   connect()는 백그라운드 스레드(worker_)를 시작하고 즉시 반환한다.
  *   worker_는 Chrome 실행 → CDP 연결 → 페이지 로드 → (Phase 13-B) 캡처 루프를 담당한다.
  *   disconnect()는 종료 플래그를 설정하고 worker_ 종료를 대기한 뒤 Chrome을 종료한다.
+ *
+ * ── 입력 처리 스레드 모델 ────────────────────────────────────────────────
+ *
+ *   send_mouse() / send_key()는 guac_websocket의 입력 루프 스레드에서 호출된다.
+ *   cdp_send()는 worker_ 스레드의 captureScreenshot 루프에서만 사용한다.
+ *   두 스레드의 CDP WebSocket 쓰기 충돌을 피하기 위해 입력 큐(input_queue_) 방식을 사용한다:
+ *
+ *   send_mouse/send_key → input_queue_ (push, mutex 보호)
+ *   captureScreenshot 루프 반복 시작 → drain_input_queue() → CDP 전송 (worker_ 스레드)
  */
 
 class GuacWebClient {
@@ -100,6 +110,40 @@ public:
 
     /** @return Chrome이 실행 중이고 CDP 연결이 수립된 상태이면 true */
     bool is_connected() const;
+
+    /**
+     * send_mouse — Guacamole mouse 명령어를 CDP Input.dispatchMouseEvent로 변환해 큐에 넣는다.
+     *
+     * Guacamole button_mask 비트 정의:
+     *   bit 0 (1):  왼쪽 버튼 pressed
+     *   bit 1 (2):  가운데 버튼 pressed
+     *   bit 2 (4):  오른쪽 버튼 pressed
+     *   bit 3 (8):  스크롤 위 (순간적)
+     *   bit 4 (16): 스크롤 아래 (순간적)
+     *
+     * 이전 button_mask와 비교해 mousePressed / mouseReleased / mouseMoved / mouseWheel을
+     * 적절히 생성하고 input_queue_에 push한다. 실제 CDP 전송은 worker_ 스레드가 담당한다.
+     *
+     * @param x           마우스 X 좌표 (뷰포트 기준)
+     * @param y           마우스 Y 좌표 (뷰포트 기준)
+     * @param button_mask Guacamole 버튼 상태 비트마스크
+     */
+    void send_mouse(int x, int y, int button_mask);
+
+    /**
+     * send_key — Guacamole key 명령어를 CDP Input.dispatchKeyEvent로 변환해 큐에 넣는다.
+     *
+     * X11 keysym → DOM KeyValue 변환:
+     *   - 0x20~0x7E: ASCII printable (space ~ tilde)
+     *   - 0xFF08: Backspace, 0xFF09: Tab, 0xFF0D: Enter, 0xFF1B: Escape
+     *   - 0xFF50~0xFF57: Home/Arrow/Page/End
+     *   - 0xFFBE~0xFFC9: F1~F12
+     *   - 0xFFE1~0xFFEA: Shift/Control/Alt/Meta 수정자 키
+     *
+     * @param keysym  X11 keysym 코드
+     * @param pressed true = 키 누름(keyDown), false = 키 해제(keyUp)
+     */
+    void send_key(int keysym, bool pressed);
 
 private:
     struct Impl;
@@ -188,6 +232,27 @@ private:
      * @return 페이로드 JSON 문자열. 연결 종료(opcode=8 또는 recv 실패) 시 빈 문자열.
      */
     std::string cdp_recv(int ws_fd);
+
+    /**
+     * drain_input_queue — input_queue_의 이벤트를 CDP로 전송하고 응답을 소비한다.
+     *
+     * worker_ 스레드에서만 호출된다. CDP 쓰기는 single-threaded이므로 별도 mutex 불필요.
+     * 큐 접근만 input_mutex_로 보호한다.
+     *
+     * @param ws_fd    CDP WebSocket fd
+     * @param next_id  CDP 요청 ID (in-out, 함수 종료 시 다음 사용 가능한 ID로 업데이트)
+     * @return 연결이 유지되면 true, 끊어지면 false
+     */
+    bool drain_input_queue(int ws_fd, int& next_id);
+
+    /**
+     * make_key_params — keysym과 pressed 상태를 CDP Input.dispatchKeyEvent 파라미터 JSON으로 변환한다.
+     *
+     * @param keysym  X11 keysym 코드
+     * @param pressed keyDown이면 true, keyUp이면 false
+     * @return CDP params JSON 문자열
+     */
+    static std::string make_key_params(int keysym, bool pressed);
 
     /**
      * flush_screenshot — base64 JPEG 이미지를 Guacamole img/blob/end 명령어 시퀀스로 전달한다.

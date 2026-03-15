@@ -60,6 +60,9 @@
 
 #include <chrono>
 #include <thread>
+#include <mutex>
+#include <queue>
+#include <utility>
 #include <stdexcept>
 #include <cstring>
 #include <vector>
@@ -69,12 +72,23 @@ namespace proxy {
 
 // ── GuacWebClient::Impl ───────────────────────────────────────────────────
 
+// 입력 큐 항목: CDP 메서드 + params
+struct InputEvent {
+    std::string method;
+    std::string params;
+};
+
 struct GuacWebClient::Impl {
-    std::atomic<bool> stop{false};
-    pid_t             chrome_pid{-1};    // fork된 Chrome 프로세스 PID
-    int               cdp_ws_fd{-1};    // CDP WebSocket TCP fd
-    int               cdp_port{9222};   // Chrome CDP 포트
-    int               next_stream_id{1}; // Guacamole 스트림 ID 카운터 (단조 증가)
+    std::atomic<bool>    stop{false};
+    pid_t                chrome_pid{-1};      // fork된 Chrome 프로세스 PID
+    int                  cdp_ws_fd{-1};       // CDP WebSocket TCP fd
+    int                  cdp_port{9222};      // Chrome CDP 포트
+    int                  next_stream_id{1};   // Guacamole 스트림 ID 카운터 (단조 증가)
+
+    // 입력 큐 — send_mouse/send_key(외부 스레드)가 push, drain_input_queue(worker_)가 pop
+    std::mutex             input_mutex;
+    std::queue<InputEvent> input_queue;
+    int                    prev_button_mask{0}; // 이전 마우스 버튼 상태 (변화 감지용)
 };
 
 // ── recv_exact 헬퍼 ───────────────────────────────────────────────────────
@@ -495,15 +509,20 @@ void GuacWebClient::run_event_loop(const std::string& url, int width, int height
         }
     }
 
-    // Phase 13-B: Page.captureScreenshot 루프
+    // Phase 13-B/C: captureScreenshot 루프 + 입력 이벤트 처리
     //
-    // ID 할당: 1=Page.enable, 2=Page.navigate, 3+=captureScreenshot
-    // 각 요청마다 고유 id를 발급해 응답과 이벤트를 구분한다.
-    // CDP 이벤트(method 필드 존재)는 무시하고 해당 id의 응답을 계속 대기한다.
+    // ID 할당: 1=Page.enable, 2=Page.navigate, 3+=입력이벤트/captureScreenshot
+    // 반복마다: ① 입력 큐 drain → ② 스크린샷 캡처
+    // CDP 이벤트(id 필드 없음)는 무시하고 해당 id의 응답을 대기한다.
     int next_id = 3;
     bool streaming = true;
 
     while (!impl_->stop.load() && streaming) {
+        // Phase 13-C: 입력 이벤트를 먼저 처리한다.
+        // drain_input_queue가 CDP 전송 + 응답 소비를 담당한다.
+        if (!drain_input_queue(ws_fd, next_id)) break;
+
+        // 스크린샷 캡처
         cdp_send(ws_fd, next_id, "Page.captureScreenshot",
                  "{\"format\":\"jpeg\",\"quality\":80}");
 
@@ -534,6 +553,197 @@ void GuacWebClient::run_event_loop(const std::string& url, int width, int height
     close(ws_fd);
     impl_->cdp_ws_fd = -1;
     connected_ = false;
+}
+
+// ── drain_input_queue ─────────────────────────────────────────────────────
+
+bool GuacWebClient::drain_input_queue(int ws_fd, int& next_id) {
+    std::unique_lock<std::mutex> lk(impl_->input_mutex);
+
+    while (!impl_->input_queue.empty()) {
+        InputEvent event = std::move(impl_->input_queue.front());
+        impl_->input_queue.pop();
+        lk.unlock();
+
+        int cur_id = next_id++;
+        cdp_send(ws_fd, cur_id, event.method, event.params);
+
+        // 입력 이벤트 응답 소비 ({"id": N, "result": {}})
+        // 이벤트(method 필드만 있음)는 무시하고 해당 id의 응답만 매칭한다.
+        while (!impl_->stop.load()) {
+            std::string msg = cdp_recv(ws_fd);
+            if (msg.empty()) return false;  // 연결 끊어짐
+
+            auto json = nlohmann::json::parse(msg, nullptr, /*allow_exceptions=*/false);
+            if (!json.is_discarded() && json.contains("id") &&
+                json["id"].get<int>() == cur_id) {
+                break;  // 응답 수신 완료
+            }
+            // id 없으면 이벤트 → 무시하고 계속 대기
+        }
+
+        lk.lock();
+    }
+    return true;
+}
+
+// ── make_key_params ───────────────────────────────────────────────────────
+
+// X11 keysym → CDP Input.dispatchKeyEvent params JSON
+// 변환 대상: ASCII printable + 주요 특수키 + F1-F12 + 수정자 키
+std::string GuacWebClient::make_key_params(int keysym, bool pressed) {
+    const std::string type = pressed ? "keyDown" : "keyUp";
+    std::string key;
+    std::string text;
+    int vk = 0;
+
+    if (keysym >= 0x20 && keysym <= 0x7E) {
+        // ASCII printable: space(0x20) ~ tilde(0x7E)
+        // Windows VK와 ASCII 코드가 같은 범위 (대소문자 포함)
+        key = std::string(1, static_cast<char>(keysym));
+        if (pressed) text = key;
+        vk = keysym;
+    } else {
+        switch (keysym) {
+            case 0xFF08: key = "Backspace";  vk = 8;   break;
+            case 0xFF09: key = "Tab";        vk = 9;   break;
+            case 0xFF0D: key = "Enter"; vk = 13;
+                         if (pressed) text = "\r";
+                         break;
+            case 0xFF1B: key = "Escape";     vk = 27;  break;
+            case 0xFF50: key = "Home";       vk = 36;  break;
+            case 0xFF51: key = "ArrowLeft";  vk = 37;  break;
+            case 0xFF52: key = "ArrowUp";    vk = 38;  break;
+            case 0xFF53: key = "ArrowRight"; vk = 39;  break;
+            case 0xFF54: key = "ArrowDown";  vk = 40;  break;
+            case 0xFF55: key = "PageUp";     vk = 33;  break;
+            case 0xFF56: key = "PageDown";   vk = 34;  break;
+            case 0xFF57: key = "End";        vk = 35;  break;
+            case 0xFF63: key = "Insert";     vk = 45;  break;
+            case 0xFFFF: key = "Delete";     vk = 46;  break;
+            // F1-F12 (0xFFBE=F1 … 0xFFC9=F12)
+            case 0xFFBE: key = "F1";  vk = 112; break;
+            case 0xFFBF: key = "F2";  vk = 113; break;
+            case 0xFFC0: key = "F3";  vk = 114; break;
+            case 0xFFC1: key = "F4";  vk = 115; break;
+            case 0xFFC2: key = "F5";  vk = 116; break;
+            case 0xFFC3: key = "F6";  vk = 117; break;
+            case 0xFFC4: key = "F7";  vk = 118; break;
+            case 0xFFC5: key = "F8";  vk = 119; break;
+            case 0xFFC6: key = "F9";  vk = 120; break;
+            case 0xFFC7: key = "F10"; vk = 121; break;
+            case 0xFFC8: key = "F11"; vk = 122; break;
+            case 0xFFC9: key = "F12"; vk = 123; break;
+            // 수정자 키 (L/R 구분 없이 같은 DOM key)
+            case 0xFFE1: case 0xFFE2: key = "Shift";   vk = 16; break;
+            case 0xFFE3: case 0xFFE4: key = "Control"; vk = 17; break;
+            case 0xFFE9: case 0xFFEA: key = "Alt";     vk = 18; break;
+            case 0xFFE7: case 0xFFE8: key = "Meta";    vk = 91; break;
+            default:                  key = "Unidentified"; break;
+        }
+    }
+
+    // JSON 직접 조합 (nlohmann/json을 쓰면 불필요한 의존성)
+    // key / text 필드는 DOM key name이므로 특수문자 이스케이프가 필요한 경우:
+    // printable ASCII에서 " \ 만 처리, \r (Enter text) 처리
+    auto escape = [](const std::string& s) {
+        std::string out;
+        for (char c : s) {
+            switch (c) {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\r': out += "\\r";  break;
+                default:   out += c;
+            }
+        }
+        return out;
+    };
+
+    std::string params = "{\"type\":\"" + type + "\",\"key\":\"" + escape(key) + "\"";
+    if (vk > 0)
+        params += ",\"windowsVirtualKeyCode\":" + std::to_string(vk);
+    if (!text.empty())
+        params += ",\"text\":\"" + escape(text) + "\"";
+    params += "}";
+    return params;
+}
+
+// ── send_mouse / send_key ─────────────────────────────────────────────────
+
+void GuacWebClient::send_mouse(int x, int y, int button_mask) {
+    int prev = impl_->prev_button_mask;
+    impl_->prev_button_mask = button_mask;
+
+    // Guacamole → CDP buttons bitmask 변환
+    // Guacamole: bit0=left, bit1=middle, bit2=right
+    // CDP (W3C): bit0(1)=left, bit1(2)=right, bit2(4)=middle
+    int cdp_buttons = 0;
+    if (button_mask & 1) cdp_buttons |= 1;  // left
+    if (button_mask & 2) cdp_buttons |= 4;  // middle
+    if (button_mask & 4) cdp_buttons |= 2;  // right
+
+    // CDP mouseEvent params 생성 헬퍼
+    auto mouse_params = [&](const std::string& type, const std::string& button,
+                             int click_count = 0) {
+        std::string p = "{\"type\":\"" + type + "\""
+                        ",\"x\":" + std::to_string(x) +
+                        ",\"y\":" + std::to_string(y) +
+                        ",\"button\":\"" + button + "\"" +
+                        ",\"buttons\":" + std::to_string(cdp_buttons);
+        if (click_count > 0)
+            p += ",\"clickCount\":" + std::to_string(click_count);
+        return p + "}";
+    };
+
+    auto push = [&](const std::string& method, const std::string& params) {
+        std::lock_guard<std::mutex> lk(impl_->input_mutex);
+        impl_->input_queue.push({method, params});
+    };
+
+    // 스크롤 처리 (bit 3/4는 순간적 — prev와 비교하지 않고 항상 전송)
+    if (button_mask & 8) {  // 스크롤 위
+        push("Input.dispatchMouseEvent",
+             "{\"type\":\"mouseWheel\""
+             ",\"x\":" + std::to_string(x) +
+             ",\"y\":" + std::to_string(y) +
+             ",\"deltaX\":0,\"deltaY\":-120}");
+    }
+    if (button_mask & 16) {  // 스크롤 아래
+        push("Input.dispatchMouseEvent",
+             "{\"type\":\"mouseWheel\""
+             ",\"x\":" + std::to_string(x) +
+             ",\"y\":" + std::to_string(y) +
+             ",\"deltaX\":0,\"deltaY\":120}");
+    }
+
+    // 버튼 변화 감지 (bit 0-2만 비교)
+    int newly_pressed  = (button_mask & ~prev) & 0x07;
+    int newly_released = (~button_mask & prev) & 0x07;
+
+    // mousePressed: 새로 눌린 버튼
+    if (newly_pressed & 1)
+        push("Input.dispatchMouseEvent", mouse_params("mousePressed", "left", 1));
+    if (newly_pressed & 2)
+        push("Input.dispatchMouseEvent", mouse_params("mousePressed", "middle", 1));
+    if (newly_pressed & 4)
+        push("Input.dispatchMouseEvent", mouse_params("mousePressed", "right", 1));
+
+    // mouseReleased: 해제된 버튼
+    if (newly_released & 1)
+        push("Input.dispatchMouseEvent", mouse_params("mouseReleased", "left", 1));
+    if (newly_released & 2)
+        push("Input.dispatchMouseEvent", mouse_params("mouseReleased", "middle", 1));
+    if (newly_released & 4)
+        push("Input.dispatchMouseEvent", mouse_params("mouseReleased", "right", 1));
+
+    // mouseMoved: 항상 전송해 위치를 업데이트한다 (버튼 상태 포함)
+    push("Input.dispatchMouseEvent", mouse_params("mouseMoved", "none"));
+}
+
+void GuacWebClient::send_key(int keysym, bool pressed) {
+    std::string params = make_key_params(keysym, pressed);
+    std::lock_guard<std::mutex> lk(impl_->input_mutex);
+    impl_->input_queue.push({"Input.dispatchKeyEvent", std::move(params)});
 }
 
 // ── flush_screenshot ──────────────────────────────────────────────────────

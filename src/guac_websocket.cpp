@@ -331,6 +331,21 @@ void GuacWebSocketGateway::handle_connection(int fd) {
             // SSH: "key" 명령어 → send_input
             if (session->ssh && ci.opcode == "key" && !ci.args.empty())
                 session->ssh->send_input(ci.args[0]);
+            // Web: "mouse" / "key" 명령어 → CDP Input 이벤트
+            if (session->web) {
+                if (ci.opcode == "mouse" && ci.args.size() >= 3) {
+                    session->web->send_mouse(
+                        std::stoi(ci.args[0]),  // x
+                        std::stoi(ci.args[1]),  // y
+                        std::stoi(ci.args[2])   // button_mask
+                    );
+                } else if (ci.opcode == "key" && ci.args.size() >= 2) {
+                    session->web->send_key(
+                        std::stoi(ci.args[0]),   // keysym
+                        ci.args[1] == "1"        // pressed
+                    );
+                }
+            }
             // TODO(Phase 9): RDP/VNC 마우스·키보드 입력 처리
         }
     }
