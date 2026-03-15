@@ -299,16 +299,12 @@ void GuacWebSocketGateway::handle_connection(int fd) {
         session->rdp = std::make_unique<GuacRdpClient>(cb);
         session->rdp->connect(get(1, "localhost"), port, get(3, ""), get(4, ""));
     } else if (protocol == "web") {
-        // TODO(Phase 13-B): GuacWebSocketGateway에서 "web" 프로토콜 라우팅 추가
-        // connect,web,https://example.com;
-        // session->web = std::make_unique<GuacWebClient>(cb);
-        // session->web->connect(get(1, "about:blank"));
-        GuacInstruction err;
-        err.opcode = "error";
-        err.args   = {"web protocol requires Phase 13-B", "1001"};
-        send_ws_frame(fd, GuacParser::serialize(err));
-        close(fd);
-        return;
+        // connect,web,<url>[,<width>[,<height>]];
+        // 예: connect,web,https://example.com,1280,800;
+        int w = std::stoi(get(2, "1280"));
+        int h = std::stoi(get(3, "800"));
+        session->web = std::make_unique<GuacWebClient>(cb);
+        session->web->connect(get(1, "about:blank"), w, h);
     } else {
         GuacInstruction err;
         err.opcode = "error";
