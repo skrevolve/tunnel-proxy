@@ -132,6 +132,7 @@ set(SOURCES
     src/guac_rdp.cpp
     src/guac_ssh.cpp
     src/guac_vnc.cpp
+    src/guac_web.cpp
     src/guac_websocket.cpp
     src/utils/config.cpp
     src/utils/logger.cpp

@@ -111,6 +111,7 @@ add_executable(test_phase8
     ../src/guac_rdp.cpp
     ../src/guac_ssh.cpp
     ../src/guac_vnc.cpp
+    ../src/guac_web.cpp
     ../src/guac_websocket.cpp
     ../src/utils/logger.cpp
 )
