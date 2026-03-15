@@ -12,7 +12,7 @@ namespace proxy {
 
 /**
  * @file guac_web.h
- * @brief Phase 13-A — Chrome headless fork/exec + CDP WebSocket 클라이언트 + 페이지 로드
+ * @brief Phase 13-A/B — Chrome headless + CDP WebSocket + JPEG 스크린샷 스트리밍
  *
  * ── 역할 ──────────────────────────────────────────────────────────────────
  *
@@ -21,16 +21,18 @@ namespace proxy {
  *   3. CDP WebSocket(RFC 6455 클라이언트)으로 Chrome에 연결한다
  *   4. Page.navigate를 전송해 지정 URL의 페이지를 로드한다
  *   5. Page.loadEventFired 이벤트를 수신해 로드 완료를 확인한다
+ *   6. Page.captureScreenshot 루프로 JPEG 스크린샷을 캡처한다       [Phase 13-B]
+ *   7. JPEG를 Guacamole img/blob/end 명령어로 변환해 콜백으로 전달한다  [Phase 13-B]
  *
  * ── GuacVncClient와의 구조적 유사성 ──────────────────────────────────────
  *
  *   GuacWebClient는 GuacVncClient와 동일한 패턴으로 설계된다:
  *   - connect() → 백그라운드 스레드(worker_)에서 이벤트 루프 실행
- *   - InstructionCallback → img/blob/end Guacamole 명령어 스트리밍 (Phase 13-B)
+ *   - InstructionCallback → img/blob/end Guacamole 명령어 스트리밍
  *   - disconnect() → 종료 플래그 + worker_ 조인
  *
- *   픽셀 소스만 libvncclient 대신 CDP `Page.captureScreenshot`으로 교체한다.
- *   (Phase 13-B에서 구현)
+ *   픽셀 소스만 libvncclient(RFB 업데이트 콜백) 대신
+ *   CDP `Page.captureScreenshot` 응답으로 교체한다.
  *
  * ── CDP (Chrome DevTools Protocol) ───────────────────────────────────────
  *
@@ -64,8 +66,9 @@ public:
     /**
      * InstructionCallback — Guacamole 명령어가 준비될 때마다 호출된다.
      *
-     * Phase 13-A: 페이지 로드 완료 시 size 명령어만 전달 (캔버스 초기화용)
-     * Phase 13-B: img / blob / end 명령어 시퀀스 추가 (스크린샷 스트리밍)
+     * 연결 수립 시: size 명령어 (캔버스 크기 설정)
+     * 매 프레임:   img / blob... / end 명령어 시퀀스 (JPEG 스크린샷)
+     * 콜백은 worker_ 스레드에서 호출된다.
      */
     using InstructionCallback = std::function<void(const GuacInstruction&)>;
 
@@ -187,6 +190,21 @@ private:
     std::string cdp_recv(int ws_fd);
 
     /**
+     * flush_screenshot — base64 JPEG 이미지를 Guacamole img/blob/end 명령어 시퀀스로 전달한다.
+     *
+     * Guacamole 스트리밍 프로토콜 (GuacVncClient::flush_dirty_region과 동일한 패턴):
+     *   img:  stream_id, "over"(합성 연산), "0"(레이어), "image/jpeg", "0"(x), "0"(y)
+     *   blob: stream_id, <base64-chunk>  (최대 8192자/청크)
+     *   end:  stream_id
+     *
+     * Page.captureScreenshot의 result.data는 이미 base64이므로 추가 인코딩 없이 사용한다.
+     *
+     * @param b64_jpeg   base64 인코딩된 JPEG 이미지 문자열
+     * @param stream_id  Guacamole 스트림 ID (Impl::next_stream_id에서 발급)
+     */
+    void flush_screenshot(const std::string& b64_jpeg, int stream_id);
+
+    /**
      * run_event_loop — worker_ 스레드 진입점
      *
      * 실행 순서:
@@ -196,7 +214,7 @@ private:
      *   4. Page.enable 전송 (Page 이벤트 구독)
      *   5. Page.navigate 전송 (URL 로드)
      *   6. Page.loadEventFired 이벤트 수신 → size 명령어 콜백 → connected_ = true
-     *   7. TODO(Phase 13-B): Page.captureScreenshot 루프 추가
+     *   7. Page.captureScreenshot 루프 → flush_screenshot() → img/blob/end 콜백
      *
      * @param url    로드할 URL
      * @param width  뷰포트 너비

@@ -1,6 +1,6 @@
 /**
  * @file guac_web.cpp
- * @brief Phase 13-A — Chrome headless fork/exec + CDP WebSocket 클라이언트 + 페이지 로드
+ * @brief Phase 13-A/B — Chrome headless + CDP WebSocket + JPEG 스크린샷 스트리밍
  *
  * ── Chrome 실행 흐름 ──────────────────────────────────────────────────────
  *
@@ -24,6 +24,19 @@
  *   Page.navigate 후 여러 이벤트가 도착한다 (frameNavigated, domContentEventFired 등).
  *   "loadEventFired"가 오면 모든 리소스 로드 완료.
  *   이 시점에 size 명령어를 콜백으로 전달해 브라우저 캔버스를 초기화한다.
+ *
+ * ── Page.captureScreenshot 루프 ───────────────────────────────────────────
+ *
+ *   요청-응답 방식: cdp_send(captureScreenshot) → cdp_recv() 대기 → flush_screenshot()
+ *   응답 식별: CDP 응답은 {"id": N, "result": {...}}, 이벤트는 {"method": "..."} 형태.
+ *             id 필드로 요청/이벤트를 구분하고, 이벤트는 무시하고 계속 대기한다.
+ *   JPEG format + quality 80: PNG보다 크기가 작아 스트리밍에 적합.
+ *                              Phase 13-D에서 delta 압축으로 개선 예정.
+ *
+ * ── flush_screenshot: JPEG → Guacamole img/blob/end ─────────────────────
+ *
+ *   Page.captureScreenshot의 result.data는 이미 base64 인코딩된 JPEG이다.
+ *   추가 인코딩 없이 8192자 단위로 청크 분할해 blob instruction으로 전달한다.
  *
  * ── Chrome 종료 전략 ──────────────────────────────────────────────────────
  *
@@ -61,6 +74,7 @@ struct GuacWebClient::Impl {
     pid_t             chrome_pid{-1};    // fork된 Chrome 프로세스 PID
     int               cdp_ws_fd{-1};    // CDP WebSocket TCP fd
     int               cdp_port{9222};   // Chrome CDP 포트
+    int               next_stream_id{1}; // Guacamole 스트림 ID 카운터 (단조 증가)
 };
 
 // ── recv_exact 헬퍼 ───────────────────────────────────────────────────────
@@ -481,17 +495,75 @@ void GuacWebClient::run_event_loop(const std::string& url, int width, int height
         }
     }
 
-    // TODO(Phase 13-B): Page.captureScreenshot 루프 추가
-    // while (!impl_->stop.load()) {
-    //     cdp_send(ws_fd, next_id++, "Page.captureScreenshot",
-    //              "{\"format\":\"jpeg\",\"quality\":80}");
-    //     std::string resp = cdp_recv(ws_fd);
-    //     // resp["result"]["data"] → base64 JPEG → GuacInstruction img/blob/end
-    // }
+    // Phase 13-B: Page.captureScreenshot 루프
+    //
+    // ID 할당: 1=Page.enable, 2=Page.navigate, 3+=captureScreenshot
+    // 각 요청마다 고유 id를 발급해 응답과 이벤트를 구분한다.
+    // CDP 이벤트(method 필드 존재)는 무시하고 해당 id의 응답을 계속 대기한다.
+    int next_id = 3;
+    bool streaming = true;
+
+    while (!impl_->stop.load() && streaming) {
+        cdp_send(ws_fd, next_id, "Page.captureScreenshot",
+                 "{\"format\":\"jpeg\",\"quality\":80}");
+
+        // 이 요청에 대한 응답(id 매칭)을 찾을 때까지 메시지를 소비한다.
+        bool got_response = false;
+        while (!impl_->stop.load() && !got_response) {
+            std::string msg = cdp_recv(ws_fd);
+            if (msg.empty()) { streaming = false; break; }
+
+            auto json = nlohmann::json::parse(msg, nullptr, /*allow_exceptions=*/false);
+            if (json.is_discarded()) continue;
+
+            // CDP 이벤트는 "method" 필드만 있고 "id" 필드가 없다.
+            // CDP 응답은 "id" 필드와 "result" 또는 "error" 필드를 가진다.
+            if (!json.contains("id")) continue;  // 이벤트 → 무시
+
+            if (json["id"].get<int>() == next_id) {
+                got_response = true;
+                if (json.contains("result") && json["result"].contains("data")) {
+                    std::string data = json["result"]["data"].get<std::string>();
+                    flush_screenshot(data, impl_->next_stream_id++);
+                }
+            }
+        }
+        ++next_id;
+    }
 
     close(ws_fd);
     impl_->cdp_ws_fd = -1;
     connected_ = false;
+}
+
+// ── flush_screenshot ──────────────────────────────────────────────────────
+
+void GuacWebClient::flush_screenshot(const std::string& b64_jpeg, int stream_id) {
+    // GuacVncClient::flush_dirty_region과 동일한 Guacamole 스트리밍 패턴:
+    //   img → blob... → end
+
+    // img instruction
+    // 인자: stream_id, compositing_op, layer, mime_type, x, y
+    // "over": 기존 레이어 위에 덮어쓰기 (alpha 합성)
+    // layer "0": 기본 레이어
+    // x/y "0": 전체 화면 교체 (좌상단 기준)
+    callback_(GuacInstruction{"img", {
+        std::to_string(stream_id), "over", "0", "image/jpeg", "0", "0"
+    }});
+
+    // blob instructions — 8192자 단위로 청크 분할
+    // Guacamole는 blob당 최대 8KB를 권장한다.
+    // Page.captureScreenshot의 data는 이미 base64이므로 추가 인코딩 불필요.
+    static const size_t CHUNK_SIZE = 8192;
+    for (size_t off = 0; off < b64_jpeg.size(); off += CHUNK_SIZE) {
+        callback_(GuacInstruction{"blob", {
+            std::to_string(stream_id),
+            b64_jpeg.substr(off, CHUNK_SIZE)
+        }});
+    }
+
+    // end instruction
+    callback_(GuacInstruction{"end", {std::to_string(stream_id)}});
 }
 
 } // namespace proxy
