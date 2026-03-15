@@ -311,7 +311,13 @@ void GuacWebSocketGateway::handle_connection(int fd) {
     while (session->active.load()) {
         std::string f = read_ws_frame(fd);
         if (f.empty()) break;
-        try { parser.feed(f); } catch (...) { break; }
+        try {
+            parser.feed(f);
+        } catch (...) {
+            // 파싱 불가 프레임(IME 특수문자 등)은 무시하고 계속 진행
+            parser.reset();
+            continue;
+        }
         while (parser.has_instruction()) {
             GuacInstruction ci = parser.next_instruction();
             // SSH: "key" 명령어 → send_input
