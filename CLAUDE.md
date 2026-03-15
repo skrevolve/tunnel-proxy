@@ -8,7 +8,7 @@ VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
 1. **리버스 터널** — 클라이언트가 NAT 뒤에 있어도 서버에서 연결 가능하게
 2. **Zero Trust 인증** — 네트워크 신뢰 없이 매 요청마다 인증 (mTLS/JWT)
 3. **Guacamole 프로토콜** — 서버에서 직접 렌더링해서 브라우저로 전달 (RDP/VNC/SSH 웹화)
-4. **webkit headless 스트리밍** — HTTPS 웹페이지를 서버에서 headless 브라우저로 렌더링, WebSocket으로 클라이언트에 스트리밍 (Guacamole가 미지원하는 웹 브라우징 원격 접근)
+4. **Remote Browser Isolation** — Guacamole 커스텀 프로토콜로 HTTPS 웹 원격 접근 구현. `GuacWebClient`가 Chromium headless를 CDP로 제어해 스크린샷을 캡처하고, 기존 Guacamole blob 스트리밍으로 브라우저 canvas에 전달
 
 최종 결과물: Cloudflare Tunnel + Apache Guacamole + Remote Browser Isolation을 C++로 직접 만든 것
 
@@ -16,7 +16,7 @@ VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
 
 ## 현재 개발 단계
 
-**Phase 11 다음** — 재연결 및 안정성
+**Phase 13 다음** — Remote Browser Isolation
 
 - [x] Phase 1 — 기본 TCP 프록시 (멀티스레드) **완료**
 - [x] Phase 2 — epoll 비동기 I/O **완료**
@@ -26,11 +26,12 @@ VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
 - [x] Phase 6 — 리버스 터널 프로토콜 **완료**
 - [x] Phase 7 — Zero Trust 인증 (mTLS / JWT) **완료**
 - [x] Phase 8 — Guacamole 프로토콜 연동 **완료**
+- [x] Phase 8-F — React 프론트엔드 (SSH 터미널 렌더링 + WebSocket 클라이언트) **완료**
 - [ ] ~~Phase 9 — 컨트롤 플레인~~ **보류** (SaaS 구조 전제, 현재 목표와 맞지 않음)
 - [ ] ~~Phase 10 — REST API~~ **보류** (동일 이유)
-- [ ] Phase 11 — 재연결 및 안정성 **다음**
-- [ ] Phase 12 — 배포
-- [ ] Phase 13 — webkit headless 스트리밍
+- [x] Phase 11 — 재연결 및 안정성 **완료**
+- [ ] Phase 12 — 배포 **보류** (Phase 13 완료 후 진행)
+- [ ] Phase 13 — Remote Browser Isolation (GuacWebClient + Chromium CDP) **다음**
 
 ---
 
@@ -155,17 +156,23 @@ PR을 올린 뒤 다음 Phase 작업을 이어서 시작하지 않는다.
 | 12-B | `build/systemd` | systemd 서비스 파일 (자동 시작 / 재시작 정책) | 리눅스 서버에서 프로세스를 데몬으로 관리. 서버 재부팅 후 자동 복구 |
 | 12-C | `build/compose` | docker-compose (서버 + 게이트웨이 + 설정 볼륨) | 서버/게이트웨이를 한 번에 올리는 로컬 개발 및 배포 환경 구성 |
 
-### Phase 13 — webkit headless 스트리밍 (Remote Browser Isolation)
+### Phase 13 — Remote Browser Isolation (GuacWebClient + Chromium CDP)
 
-Guacamole는 VNC/RDP/SSH만 지원한다. HTTPS 웹페이지에 원격 접근하려면 서버에서 headless 브라우저가 페이지를 렌더링하고, 그 결과를 WebSocket으로 클라이언트에 스트리밍해야 한다.
-사용자는 브라우저에서 WSS:443으로 접속해 서버 측 headless 브라우저를 제어한다.
+Guacamole는 RDP/VNC/SSH만 지원한다. HTTPS 웹페이지 원격 접근을 위해 `GuacWebClient`를 새 Guacamole 커스텀 프로토콜로 추가한다.
+
+구조: `connect,web,https://...;` → `GuacWebClient` → Chromium headless(CDP) → 스크린샷 → blob 스트리밍 → 브라우저 canvas
+
+`GuacWebClient`는 `GuacVncClient`와 동일한 구조다. 픽셀 소스만 libvncclient 대신 CDP `Page.captureScreenshot`으로 교체된다.
+
+Chromium은 system dependency로 취급한다 (OpenSSL과 동일). 설치: `apt install chromium-browser`
 
 | 세션 | 브랜치 | 작업 | 왜 필요한가 |
 |------|--------|------|-------------|
-| 13-A | `feat/webkit-headless` | libwebkit2gtk 또는 Chromium headless 연동 + 페이지 로드 | Guacamole가 지원 못하는 HTTPS 웹 원격 접근. 폐쇄망 내부 웹 서비스를 외부 브라우저에서 사용 가능하게 함 |
-| 13-B | `feat/webkit-capture` | 화면 캡처 (픽셀 버퍼) + 입력 이벤트 주입 (키보드/마우스) | 렌더링 결과를 클라이언트로 보내고 사용자 입력을 headless 브라우저로 전달. 양방향 제어 |
-| 13-C | `feat/webkit-stream` | WebSocket 전송 + 프레임 압축 (PNG/JPEG delta) | 매 프레임 전체를 보내면 대역폭 낭비. 변경된 영역(delta)만 압축 전송해 실시간성 확보 |
-| 13-D | `test/webkit-e2e` | 웹 클라이언트 ↔ WebSocket ↔ headless 브라우저 E2E 테스트 | 실제 웹 페이지 로드 → 렌더링 → 스트리밍 → 클라이언트 수신 전 구간 검증 |
+| 13-A | `feat/guac-web-cdp` | Chrome 프로세스 fork/exec + CDP WebSocket 클라이언트 + 페이지 로드 | Chromium을 headless로 구동하고 CDP로 제어하는 기반. `--remote-debugging-port`로 CDP 포트 열기 |
+| 13-B | `feat/guac-web-stream` | `Page.captureScreenshot` 루프 → JPEG blob 스트리밍 + `GuacWebSocketGateway` 라우팅 추가 | 스크린샷을 기존 Guacamole blob 경로로 전송. 프론트엔드 canvas 렌더링은 RDP/VNC와 동일 |
+| 13-C | `feat/guac-web-input` | 마우스/키보드 입력 → CDP `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent` | 사용자 입력을 Chromium에 주입해 양방향 제어 완성 |
+| 13-D | `feat/guac-web-delta` | 변경 영역 delta 압축 (전 프레임 비교 → 변경된 rect만 전송) | 전체 프레임 전송은 대역폭 낭비. delta로 실시간성 확보 |
+| 13-E | `test/guac-web-e2e` | 프론트엔드 ↔ GuacWebClient ↔ Chromium E2E 테스트 | 전 구간 검증 |
 
 ---
 
@@ -314,11 +321,12 @@ Total Test time (real) = 0.XXs
 이유: WSL/Ubuntu/Docker/서버 등 환경마다 패키지 이름과 버전이 달라 의존성이 깨짐.
 모든 외부 라이브러리는 CMakeLists.txt의 FetchContent로 관리.
 
-시스템 의존성 (find_package로만 탐지):
+시스템 의존성 (find_package 또는 경로 탐지):
 - CMake 3.14+
 - GCC 11+ (C++17)
 - OpenSSL 3.x
 - pthread
+- Chromium (Phase 13 전용) — FetchContent 불가한 바이너리. `which chromium-browser || which chromium`으로 경로 탐지. 설치: `apt install chromium-browser`
 
 FetchContent로 관리하는 라이브러리:
 - nlohmann/json v3.11.3
