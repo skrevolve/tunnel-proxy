@@ -124,6 +124,7 @@ target_include_directories(test_phase8 SYSTEM PRIVATE
     ${libssh2_SOURCE_DIR}/include
     ${libvncserver_SOURCE_DIR}
     ${libvncserver_BINARY_DIR}
+    ${stb_SOURCE_DIR}
 )
 target_link_libraries(test_phase8
     GTest::gtest_main
