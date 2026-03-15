@@ -20,8 +20,22 @@ export interface GuacState {
   log: string[];
 }
 
-export function useGuacamole() {
-  const wsRef = useRef<WebSocket | null>(null);
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * @param onTerminalData SSH blob 수신 시 호출 — React state를 거치지 않고
+ *                        xterm.js에 직접 write하기 위해 ref 콜백으로 전달
+ */
+export function useGuacamole(onTerminalData?: (data: Uint8Array) => void) {
+  const wsRef              = useRef<WebSocket | null>(null);
+  const onTerminalDataRef  = useRef(onTerminalData);
+  onTerminalDataRef.current = onTerminalData;
+
   const [state, setState] = useState<GuacState>({
     status: 'idle',
     error: null,
@@ -39,7 +53,6 @@ export function useGuacamole() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      // connect 명령어를 첫 번째 프레임으로 즉시 전송
       const instr =
         params.protocol === 'vnc'
           ? serialize('connect', params.protocol, params.host, params.port, params.password)
@@ -53,7 +66,11 @@ export function useGuacamole() {
     ws.onmessage = (event: MessageEvent<string>) => {
       const instrs = parse(event.data);
       for (const instr of instrs) {
-        addLog(`← [${instr.opcode}] ${instr.args.join(' | ')}`);
+        // blob: SSH 터미널 출력 — base64 디코딩 후 xterm에 직접 전달
+        if (instr.opcode === 'blob' && instr.args[1]) {
+          onTerminalDataRef.current?.(base64ToBytes(instr.args[1]));
+        }
+        addLog(`← [${instr.opcode}] ${instr.args[0] ?? ''}`);
       }
     };
 
@@ -75,9 +92,9 @@ export function useGuacamole() {
     wsRef.current = null;
   }, []);
 
-  const sendKey = useCallback((key: string) => {
+  const sendKey = useCallback((data: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(serialize('key', key));
+      wsRef.current.send(serialize('key', data));
     }
   }, []);
 

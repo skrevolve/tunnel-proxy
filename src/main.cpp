@@ -1,6 +1,7 @@
 #include <iostream>
 #include <csignal>
 #include "core/epoll_proxy.h"
+#include "core/guac_websocket.h"
 #include "utils/config.h"
 #include "utils/logger.h"
 
@@ -16,7 +17,8 @@
 //       stop()은 atomic 쓰기 + shutdown() 호출이므로 사실상 안전하게 동작하나,
 //       엄밀히는 async-signal-safe가 보장된 write() + _Exit() 정도만 권장된다.
 //       Phase 11(안정성)에서 self-pipe trick으로 개선 예정.
-EpollProxy* g_proxy = nullptr;
+EpollProxy*            g_proxy   = nullptr;
+proxy::GuacWebSocketGateway* g_gateway = nullptr;
 
 // ── 시그널 핸들러 ──────────────────────────────────────────────────────────────
 
@@ -24,11 +26,8 @@ void signal_handler(int signum) {
     // SIGINT (2) : Ctrl+C 입력 시 발생
     // SIGTERM(15): kill 명령이나 systemd stop 시 발생
     Logger::info("Received signal " + std::to_string(signum) + ", shutting down...");
-    if (g_proxy) {
-        g_proxy->stop();
-        // stop()은 running_=false + shutdown(listen_fd_)를 수행해
-        // run()의 accept() 루프를 빠져나오게 만든다.
-    }
+    if (g_gateway) g_gateway->stop();
+    if (g_proxy)   g_proxy->stop();
 }
 
 // ── 사용법 출력 ────────────────────────────────────────────────────────────────
@@ -90,6 +89,12 @@ int main(int argc, char* argv[]) {
             config.get_target_ip(),
             config.get_target_port()
         );
+
+        // Guacamole WebSocket 게이트웨이 시작 (포트 8765)
+        proxy::GuacWebSocketGateway gateway;
+        gateway.start(8765);
+        g_gateway = &gateway;
+        Logger::info("Guacamole WebSocket gateway listening on port 8765");
 
         // 3단계: 시그널 핸들러 등록
         // proxy가 스택에 있으므로 g_proxy에 주소를 저장한다.
