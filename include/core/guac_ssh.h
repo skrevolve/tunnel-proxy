@@ -7,6 +7,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <queue>
 
 namespace proxy {
 
@@ -116,8 +117,9 @@ public:
     /**
      * 키보드 입력을 SSH 채널로 전송한다.
      *
-     * worker_ 스레드와 외부 스레드가 동시에 호출할 수 있으므로
-     * channel_mutex_로 쓰기를 직렬화한다.
+     * 호출 스레드에서 input_queue_에 push만 하고 즉시 반환.
+     * 실제 libssh2_channel_write는 worker_ 스레드에서 수행한다.
+     * (libssh2는 thread-safe하지 않으므로 단일 스레드 접근 필수)
      *
      * @param data  전송할 바이트열 (UTF-8 터미널 입력)
      */
@@ -127,12 +129,13 @@ private:
     // libssh2 타입을 숨기기 위한 pImpl
     struct Impl;
 
-    InstructionCallback   callback_;
-    std::atomic<bool>     connected_{false};
-    std::thread           worker_;
-    std::unique_ptr<Impl> impl_;
-    std::mutex            channel_mutex_;  // libssh2_channel_write 직렬화
-    int                   stream_id_{0};   // Guacamole 터미널 스트림 ID
+    InstructionCallback        callback_;
+    std::atomic<bool>          connected_{false};
+    std::thread                worker_;
+    std::unique_ptr<Impl>      impl_;
+    std::mutex                 input_queue_mutex_;
+    std::queue<std::string>    input_queue_;   // send_input → worker_ 단방향 전달
+    int                        stream_id_{0};  // Guacamole 터미널 스트림 ID
 
     /**
      * run_event_loop — worker_ 스레드 진입점

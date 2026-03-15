@@ -193,6 +193,25 @@ body {
 .session-title { font-weight: 500; }
 .status-label { color: var(--text-muted); font-size: 12px; }
 
+.header-actions { display: flex; gap: 8px; align-items: center; }
+
+.btn-debug {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 6px 10px;
+  transition: all 0.15s;
+}
+
+.btn-debug:hover { border-color: var(--text-muted); color: var(--text); }
+.btn-debug.active { border-color: var(--primary); color: var(--primary); }
+
 .session-body {
   display: flex;
   flex: 1;
@@ -215,6 +234,33 @@ body {
   justify-content: center;
   min-height: 200px;
 }
+
+/* ── Session ended overlay ──────────────────────────── */
+.session-ended-overlay {
+  align-items: center;
+  background: rgba(15, 17, 23, 0.85);
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.session-ended-box {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 32px 40px;
+  text-align: center;
+}
+
+.session-ended-box span { color: var(--text-muted); font-size: 14px; }
 
 /* ── Error banner ───────────────────────────────────── */
 .error-banner {

@@ -70,15 +70,21 @@ export function useGuacamole(onTerminalData?: (data: Uint8Array) => void) {
         if (instr.opcode === 'blob' && instr.args[1]) {
           onTerminalDataRef.current?.(base64ToBytes(instr.args[1]));
         }
+        // end: SSH 세션 종료 — WebSocket을 닫아 onclose가 상태 전환
+        if (instr.opcode === 'end') {
+          ws.close();
+        }
         addLog(`← [${instr.opcode}] ${instr.args[0] ?? ''}`);
       }
     };
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return; // stale handler (StrictMode 이중 마운트 등)
       setState(s => ({ ...s, status: 'error', error: '서버 연결 실패' }));
     };
 
     ws.onclose = () => {
+      if (wsRef.current !== ws) return; // stale handler
       setState(s => ({
         ...s,
         status: s.status === 'error' ? 'error' : 'disconnected',

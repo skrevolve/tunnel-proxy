@@ -10,9 +10,14 @@ export interface Instruction {
   args: string[];
 }
 
+const _enc = new TextEncoder();
+
 export function serialize(opcode: string, ...args: string[]): string {
   const elements = [opcode, ...args];
-  return elements.map(e => `${e.length}.${e}`).join(',') + ';';
+  // Guacamole 프로토콜은 UTF-8 바이트 길이를 사용한다.
+  // JS의 String.length는 UTF-16 코드 유닛 기준이라 한글/이모지 등에서
+  // 길이가 달라지므로 TextEncoder로 실제 바이트 수를 계산한다.
+  return elements.map(e => `${_enc.encode(e).length}.${e}`).join(',') + ';';
 }
 
 export function parse(text: string): Instruction[] {
