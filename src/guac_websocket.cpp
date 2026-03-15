@@ -57,6 +57,7 @@ struct WsSession {
     std::unique_ptr<GuacRdpClient> rdp;
     std::unique_ptr<GuacSshClient> ssh;
     std::unique_ptr<GuacVncClient> vnc;
+    std::unique_ptr<GuacWebClient> web;
 
     explicit WsSession(int f) : fd(f) {}
 };
@@ -297,6 +298,17 @@ void GuacWebSocketGateway::handle_connection(int fd) {
         uint16_t port = static_cast<uint16_t>(std::stoi(get(2, "3389")));
         session->rdp = std::make_unique<GuacRdpClient>(cb);
         session->rdp->connect(get(1, "localhost"), port, get(3, ""), get(4, ""));
+    } else if (protocol == "web") {
+        // TODO(Phase 13-B): GuacWebSocketGateway에서 "web" 프로토콜 라우팅 추가
+        // connect,web,https://example.com;
+        // session->web = std::make_unique<GuacWebClient>(cb);
+        // session->web->connect(get(1, "about:blank"));
+        GuacInstruction err;
+        err.opcode = "error";
+        err.args   = {"web protocol requires Phase 13-B", "1001"};
+        send_ws_frame(fd, GuacParser::serialize(err));
+        close(fd);
+        return;
     } else {
         GuacInstruction err;
         err.opcode = "error";
@@ -331,6 +343,7 @@ void GuacWebSocketGateway::handle_connection(int fd) {
     if (session->rdp) session->rdp->disconnect();
     if (session->ssh) session->ssh->disconnect();
     if (session->vnc) session->vnc->disconnect();
+    if (session->web) session->web->disconnect();
     close(fd);
 }
 

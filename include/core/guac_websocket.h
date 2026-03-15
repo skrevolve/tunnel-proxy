@@ -4,6 +4,7 @@
 #include "core/guac_rdp.h"
 #include "core/guac_ssh.h"
 #include "core/guac_vnc.h"
+#include "core/guac_web.h"
 
 #include <memory>
 #include <thread>
