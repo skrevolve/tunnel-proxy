@@ -114,6 +114,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libvncserver)
 
+# stb (single-file public domain image libraries) — Phase 13-D delta 압축
+# stb는 CMakeLists.txt가 없는 헤더 전용 라이브러리이므로
+# FetchContent_MakeAvailable 대신 FetchContent_Populate로 소스만 다운로드한 뒤
+# include_directories로 직접 추가한다.
+FetchContent_Declare(
+    stb
+    URL https://github.com/nothings/stb/archive/refs/heads/master.tar.gz
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()
+
 # 소스 파일 목록
 set(SOURCES
     src/main.cpp
@@ -152,6 +165,7 @@ target_include_directories(proxy SYSTEM PRIVATE
     ${libssh2_SOURCE_DIR}/include
     ${libvncserver_SOURCE_DIR}
     ${libvncserver_BINARY_DIR}
+    ${stb_SOURCE_DIR}              # stb_image.h, stb_image_write.h (Phase 13-D)
 )
 
 # 라이브러리 링크

@@ -255,19 +255,22 @@ private:
     static std::string make_key_params(int keysym, bool pressed);
 
     /**
-     * flush_screenshot — base64 JPEG 이미지를 Guacamole img/blob/end 명령어 시퀀스로 전달한다.
+     * flush_delta — 전 프레임과 비교해 변경된 영역만 JPEG 재인코딩해 전송한다.
      *
-     * Guacamole 스트리밍 프로토콜 (GuacVncClient::flush_dirty_region과 동일한 패턴):
-     *   img:  stream_id, "over"(합성 연산), "0"(레이어), "image/jpeg", "0"(x), "0"(y)
-     *   blob: stream_id, <base64-chunk>  (최대 8192자/청크)
-     *   end:  stream_id
-     *
-     * Page.captureScreenshot의 result.data는 이미 base64이므로 추가 인코딩 없이 사용한다.
+     * Phase 13-D delta 압축 알고리즘:
+     *   1. b64_jpeg를 base64 decode → stb_image로 RGB 픽셀 디코딩
+     *   2. Impl::prev_pixels(이전 프레임)와 픽셀 단위 비교
+     *      - 변화 없음: 전송 스킵 (연속 동일 프레임 대역폭 0)
+     *      - 변화 있음: dirty bounding rect (min/max 변화 행·열) 계산
+     *   3. dirty rect가 전체의 75% 미만이면 해당 영역만 JPEG 재인코딩 전송
+     *      (75% 이상이면 원본 b64_jpeg 그대로 사용 — 재인코딩 오버헤드 불필요)
+     *   4. img instruction의 x/y를 dirty rect 오프셋으로 설정 → 캔버스 부분 업데이트
+     *   5. 현재 픽셀을 Impl::prev_pixels에 저장 (다음 프레임 비교용)
      *
      * @param b64_jpeg   base64 인코딩된 JPEG 이미지 문자열
      * @param stream_id  Guacamole 스트림 ID (Impl::next_stream_id에서 발급)
      */
-    void flush_screenshot(const std::string& b64_jpeg, int stream_id);
+    void flush_delta(const std::string& b64_jpeg, int stream_id);
 
     /**
      * run_event_loop — worker_ 스레드 진입점

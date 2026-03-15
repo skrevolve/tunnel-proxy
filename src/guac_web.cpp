@@ -47,7 +47,20 @@
 #include "core/guac_web.h"
 
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>  // EVP_EncodeBlock (base64)
+#include <openssl/evp.h>  // EVP_EncodeBlock / EVP_DecodeBlock (base64)
+
+// stb_image — JPEG 디코딩 (Phase 13-D delta 압축)
+// STB_IMAGE_IMPLEMENTATION은 이 번역 단위에서 한 번만 정의해야 한다.
+// stb 헤더는 -Wextra/-Wpedantic 경고를 다수 발생시키므로 진단을 임시 억제한다.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+#pragma GCC diagnostic pop
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -89,6 +102,11 @@ struct GuacWebClient::Impl {
     std::mutex             input_mutex;
     std::queue<InputEvent> input_queue;
     int                    prev_button_mask{0}; // 이전 마우스 버튼 상태 (변화 감지용)
+
+    // delta 압축 — 이전 프레임 RGB 픽셀 버퍼 (Phase 13-D)
+    std::vector<uint8_t>   prev_pixels;       // width × height × 3 (RGB24)
+    int                    frame_width{0};
+    int                    frame_height{0};
 };
 
 // ── recv_exact 헬퍼 ───────────────────────────────────────────────────────
@@ -543,7 +561,7 @@ void GuacWebClient::run_event_loop(const std::string& url, int width, int height
                 got_response = true;
                 if (json.contains("result") && json["result"].contains("data")) {
                     std::string data = json["result"]["data"].get<std::string>();
-                    flush_screenshot(data, impl_->next_stream_id++);
+                    flush_delta(data, impl_->next_stream_id++);
                 }
             }
         }
@@ -746,34 +764,167 @@ void GuacWebClient::send_key(int keysym, bool pressed) {
     impl_->input_queue.push({"Input.dispatchKeyEvent", std::move(params)});
 }
 
-// ── flush_screenshot ──────────────────────────────────────────────────────
+// ── flush_delta 헬퍼 ──────────────────────────────────────────────────────
 
-void GuacWebClient::flush_screenshot(const std::string& b64_jpeg, int stream_id) {
-    // GuacVncClient::flush_dirty_region과 동일한 Guacamole 스트리밍 패턴:
-    //   img → blob... → end
+// base64 문자열 → raw bytes (OpenSSL EVP_DecodeBlock)
+static std::vector<uint8_t> base64_decode(const std::string& b64) {
+    if (b64.empty()) return {};
+    std::vector<uint8_t> buf(b64.size());
+    int len = EVP_DecodeBlock(
+        buf.data(),
+        reinterpret_cast<const unsigned char*>(b64.data()),
+        static_cast<int>(b64.size()));
+    if (len < 0) return {};
+    // base64 패딩('=')으로 인해 끝에 최대 2바이트 0이 추가됨 — 제거
+    size_t padding = 0;
+    if (b64.size() >= 1 && b64.back()             == '=') padding++;
+    if (b64.size() >= 2 && b64[b64.size() - 2]   == '=') padding++;
+    buf.resize(static_cast<size_t>(len) - padding);
+    return buf;
+}
 
-    // img instruction
-    // 인자: stream_id, compositing_op, layer, mime_type, x, y
-    // "over": 기존 레이어 위에 덮어쓰기 (alpha 합성)
-    // layer "0": 기본 레이어
-    // x/y "0": 전체 화면 교체 (좌상단 기준)
-    callback_(GuacInstruction{"img", {
-        std::to_string(stream_id), "over", "0", "image/jpeg", "0", "0"
-    }});
+// raw JPEG bytes → 특정 rect의 base64 JPEG 문자열 생성
+// rect가 (0,0,w,h)이면 전체 원본 b64_jpeg를 그대로 반환 (재인코딩 생략)
+static std::string encode_rect_jpeg(
+        const std::string& b64_full,
+        const uint8_t* pixels, int full_w,
+        int rx, int ry, int rw, int rh) {
 
-    // blob instructions — 8192자 단위로 청크 분할
-    // Guacamole는 blob당 최대 8KB를 권장한다.
-    // Page.captureScreenshot의 data는 이미 base64이므로 추가 인코딩 불필요.
-    static const size_t CHUNK_SIZE = 8192;
-    for (size_t off = 0; off < b64_jpeg.size(); off += CHUNK_SIZE) {
-        callback_(GuacInstruction{"blob", {
-            std::to_string(stream_id),
-            b64_jpeg.substr(off, CHUNK_SIZE)
-        }});
+    if (rx == 0 && ry == 0 && rw == full_w) {
+        // 전체 프레임 — 원본 base64 그대로 사용
+        return b64_full;
     }
 
-    // end instruction
-    callback_(GuacInstruction{"end", {std::to_string(stream_id)}});
+    // dirty rect 픽셀 추출 (RGB24)
+    std::vector<uint8_t> sub;
+    sub.reserve(static_cast<size_t>(rw) * rh * 3);
+    for (int row = ry; row < ry + rh; row++) {
+        const uint8_t* src = pixels + (row * full_w + rx) * 3;
+        sub.insert(sub.end(), src, src + rw * 3);
+    }
+
+    // stb_image_write로 JPEG 인코딩
+    std::vector<uint8_t> jpeg_out;
+    stbi_write_jpg_to_func(
+        [](void* ctx, void* data, int size) {
+            auto* out = static_cast<std::vector<uint8_t>*>(ctx);
+            out->insert(out->end(),
+                        static_cast<uint8_t*>(data),
+                        static_cast<uint8_t*>(data) + size);
+        },
+        &jpeg_out, rw, rh, 3, sub.data(), 85  // quality 85
+    );
+
+    if (jpeg_out.empty()) return b64_full;  // 인코딩 실패 → fallback
+
+    // base64 인코딩 (OpenSSL EVP_EncodeBlock)
+    size_t b64_len = ((jpeg_out.size() + 2) / 3) * 4 + 1;
+    std::string b64(b64_len, '\0');
+    int len = EVP_EncodeBlock(
+        reinterpret_cast<unsigned char*>(b64.data()),
+        jpeg_out.data(), static_cast<int>(jpeg_out.size()));
+    b64.resize(static_cast<size_t>(len));
+    return b64;
+}
+
+// Guacamole img/blob/end 전송 헬퍼
+static void send_guac_image(
+        const std::function<void(const GuacInstruction&)>& callback,
+        int stream_id, int x, int y, const std::string& b64_jpeg) {
+
+    callback(GuacInstruction{"img",
+        {std::to_string(stream_id), "over", "0", "image/jpeg",
+         std::to_string(x), std::to_string(y)}});
+
+    static const size_t CHUNK = 8192;
+    for (size_t off = 0; off < b64_jpeg.size(); off += CHUNK) {
+        callback(GuacInstruction{"blob",
+            {std::to_string(stream_id), b64_jpeg.substr(off, CHUNK)}});
+    }
+    callback(GuacInstruction{"end", {std::to_string(stream_id)}});
+}
+
+// ── flush_delta ───────────────────────────────────────────────────────────
+
+void GuacWebClient::flush_delta(const std::string& b64_jpeg, int stream_id) {
+    // 1. base64 decode → raw JPEG bytes
+    auto jpeg_bytes = base64_decode(b64_jpeg);
+    if (jpeg_bytes.empty()) return;
+
+    // 2. JPEG decode → RGB24 픽셀 (stb_image)
+    int w = 0, h = 0, comp = 0;
+    uint8_t* pixels = stbi_load_from_memory(
+        jpeg_bytes.data(), static_cast<int>(jpeg_bytes.size()),
+        &w, &h, &comp, 3  // force RGB24
+    );
+    if (!pixels) {
+        // JPEG 디코딩 실패 → 전체 프레임 전송 (fallback)
+        send_guac_image(callback_, stream_id, 0, 0, b64_jpeg);
+        return;
+    }
+
+    const size_t pixel_bytes = static_cast<size_t>(w) * h * 3;
+
+    // 3. 이전 프레임과 픽셀 단위 비교 → dirty bounding rect 계산
+    bool has_prev = (impl_->prev_pixels.size() == pixel_bytes &&
+                     impl_->frame_width == w && impl_->frame_height == h);
+
+    // dirty rect: (rx, ry, rw, rh)
+    int rx = 0, ry = 0, rw = w, rh = h;  // 기본: 전체 프레임
+
+    if (has_prev) {
+        int min_row = -1, max_row = -1;
+        int min_col = w,  max_col = -1;
+
+        for (int row = 0; row < h; row++) {
+            const uint8_t* prev_row = impl_->prev_pixels.data() + row * w * 3;
+            const uint8_t* curr_row = pixels + row * w * 3;
+
+            // 행 전체를 memcmp로 빠르게 비교
+            if (memcmp(prev_row, curr_row, static_cast<size_t>(w) * 3) == 0) continue;
+
+            if (min_row == -1) min_row = row;
+            max_row = row;
+
+            // 변화 있는 행에서 열 단위 스캔 (dirty 열 범위 계산)
+            for (int col = 0; col < w; col++) {
+                const uint8_t* p = prev_row + col * 3;
+                const uint8_t* c = curr_row + col * 3;
+                if (p[0] != c[0] || p[1] != c[1] || p[2] != c[2]) {
+                    min_col = std::min(min_col, col);
+                    max_col = std::max(max_col, col);
+                }
+            }
+        }
+
+        if (min_row == -1) {
+            // 변화 없음 — 전송 스킵
+            stbi_image_free(pixels);
+            return;
+        }
+
+        rx = min_col;
+        ry = min_row;
+        rw = max_col - min_col + 1;
+        rh = max_row - min_row + 1;
+    }
+
+    // 4. 현재 픽셀을 이전 프레임으로 저장 (다음 비교용)
+    impl_->prev_pixels.assign(pixels, pixels + pixel_bytes);
+    impl_->frame_width  = w;
+    impl_->frame_height = h;
+
+    // 5. dirty rect vs 전체 비교 → 75% 이상이면 원본 전체 전송
+    //    부분 인코딩 오버헤드보다 원본 전송이 더 효율적인 임계값
+    const bool use_full = (rw * rh * 4 >= w * h * 3);  // dirty >= 75%
+    if (use_full) { rx = ry = 0; rw = w; rh = h; }
+
+    // 6. dirty rect JPEG 생성 (재인코딩 또는 원본 재사용)
+    std::string b64_out = encode_rect_jpeg(b64_jpeg, pixels, w, rx, ry, rw, rh);
+    stbi_image_free(pixels);
+
+    // 7. Guacamole img/blob/end 전송
+    send_guac_image(callback_, stream_id, rx, ry, b64_out);
 }
 
 } // namespace proxy
