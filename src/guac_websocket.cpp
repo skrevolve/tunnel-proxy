@@ -276,10 +276,15 @@ void GuacWebSocketGateway::handle_connection(int fd) {
     const std::string protocol = instr.args[0];
 
     // 백엔드 → WebSocket 전달 콜백
-    auto cb = [session](const GuacInstruction& gi) {
+    // weak_ptr 사용: cb가 session->ssh->callback_에 저장되면
+    // session → ssh → callback_ → lambda → session 순환 참조가 생겨 메모리 누수 발생
+    std::weak_ptr<WsSession> weak_session = session;
+    auto cb = [weak_session](const GuacInstruction& gi) {
+        auto s = weak_session.lock();
+        if (!s || !s->active.load()) return;
         std::string text = GuacParser::serialize(gi);
-        std::lock_guard<std::mutex> lock(session->send_mutex);
-        if (session->active.load()) send_ws_frame(session->fd, text);
+        std::lock_guard<std::mutex> lock(s->send_mutex);
+        send_ws_frame(s->fd, text);
     };
 
     auto get = [&](size_t idx, const std::string& def) {
