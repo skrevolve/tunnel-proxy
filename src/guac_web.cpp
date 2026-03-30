@@ -137,9 +137,10 @@ GuacWebClient::~GuacWebClient() {
 
 // ── 공개 API ──────────────────────────────────────────────────────────────
 
-void GuacWebClient::connect(const std::string& url, int width, int height) {
+void GuacWebClient::connect(const std::string& url, int width, int height, int cdp_port) {
     if (connected_.load()) return;
-    impl_->stop = false;
+    impl_->stop     = false;
+    impl_->cdp_port = cdp_port;
     worker_ = std::thread(&GuacWebClient::run_event_loop, this, url, width, height);
 }
 
@@ -204,6 +205,21 @@ std::string GuacWebClient::find_chromium() {
 // ── Chrome fork/exec ──────────────────────────────────────────────────────
 
 pid_t GuacWebClient::fork_chromium(int cdp_port, int width, int height) {
+    // 지정한 포트에 이미 리스너가 있으면 Chrome fork 생략 (테스트용 MockCdpServer 감지)
+    {
+        int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (probe >= 0) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port   = htons(static_cast<uint16_t>(cdp_port));
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            bool already_open = (::connect(probe,
+                reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+            ::close(probe);
+            if (already_open) return 0;  // 외부 CDP 서버 — Chrome fork 불필요
+        }
+    }
+
     std::string chrome = find_chromium();
     if (chrome.empty()) return -1;
 

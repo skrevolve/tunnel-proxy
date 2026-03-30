@@ -95,10 +95,12 @@ public:
      * 연결 성공 시 is_connected()가 true를 반환.
      *
      * @param url    로드할 URL (예: "https://example.com")
-     * @param width  캔버스 너비 (기본 1280)
-     * @param height 캔버스 높이 (기본 800)
+     * @param width    캔버스 너비 (기본 1280)
+     * @param height   캔버스 높이 (기본 800)
+     * @param cdp_port Chrome CDP 포트 (기본 9222). 테스트 시 MockCdpServer 포트를 지정한다.
+     *                 지정한 포트가 이미 열려 있으면 Chrome fork를 생략한다.
      */
-    void connect(const std::string& url, int width = 1280, int height = 800);
+    void connect(const std::string& url, int width = 1280, int height = 800, int cdp_port = 9222);
 
     /**
      * Chrome 연결을 종료하고 프로세스를 종료한다.
