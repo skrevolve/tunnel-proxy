@@ -2,31 +2,45 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { Protocol, ConnectParams } from '../hooks/useGuacamole';
 
-const DEFAULT_PORTS: Record<Protocol, string> = {
+const DEFAULT_PORTS: Partial<Record<Protocol, string>> = {
   rdp: '3389',
   ssh: '22',
   vnc: '5900',
 };
 
+const PROTOCOL_LABELS: Record<Protocol, string> = {
+  rdp: 'RDP',
+  ssh: 'SSH',
+  vnc: 'VNC',
+  web: 'WEB',
+};
+
 export default function ConnectPage() {
   const navigate = useNavigate();
   const [form, setForm] = useState<ConnectParams>({
-    wsUrl: 'ws://localhost:8765',
+    wsUrl:    'ws://localhost:8765',
     protocol: 'ssh',
-    host: 'localhost',
-    port: '22',
+    host:     'localhost',
+    port:     '22',
     username: '',
     password: '',
+    url:      'https://example.com',
   });
 
   const handleProtocol = (p: Protocol) => {
-    setForm(f => ({ ...f, protocol: p, port: DEFAULT_PORTS[p] }));
+    setForm(f => ({
+      ...f,
+      protocol: p,
+      port: DEFAULT_PORTS[p] ?? '',
+    }));
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     navigate('/session', { state: form });
   };
+
+  const isWeb = form.protocol === 'web';
 
   return (
     <div className="page center">
@@ -48,7 +62,7 @@ export default function ConnectPage() {
           <div className="field">
             <label>프로토콜</label>
             <div className="radio-group">
-              {(['rdp', 'ssh', 'vnc'] as Protocol[]).map(p => (
+              {(['rdp', 'ssh', 'vnc', 'web'] as Protocol[]).map(p => (
                 <label
                   key={p}
                   className={`radio ${form.protocol === p ? 'active' : ''}`}
@@ -60,33 +74,48 @@ export default function ConnectPage() {
                     checked={form.protocol === p}
                     onChange={() => handleProtocol(p)}
                   />
-                  {p.toUpperCase()}
+                  {PROTOCOL_LABELS[p]}
                 </label>
               ))}
             </div>
           </div>
 
-          <div className="row">
-            <div className="field flex-1">
-              <label>호스트</label>
+          {isWeb ? (
+            /* web 프로토콜: host/port 대신 URL 입력 */
+            <div className="field">
+              <label>URL</label>
               <input
-                value={form.host}
-                onChange={e => setForm(f => ({ ...f, host: e.target.value }))}
-                placeholder="192.168.0.1"
+                value={form.url ?? ''}
+                onChange={e => setForm(f => ({ ...f, url: e.target.value }))}
+                placeholder="https://example.com"
                 required
               />
             </div>
-            <div className="field port-field">
-              <label>포트</label>
-              <input
-                value={form.port}
-                onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
-                required
-              />
+          ) : (
+            /* rdp / ssh / vnc: host:port 입력 */
+            <div className="row">
+              <div className="field flex-1">
+                <label>호스트</label>
+                <input
+                  value={form.host}
+                  onChange={e => setForm(f => ({ ...f, host: e.target.value }))}
+                  placeholder="192.168.0.1"
+                  required
+                />
+              </div>
+              <div className="field port-field">
+                <label>포트</label>
+                <input
+                  value={form.port}
+                  onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
+                  required
+                />
+              </div>
             </div>
-          </div>
+          )}
 
-          {form.protocol !== 'vnc' && (
+          {/* 사용자명: rdp / ssh만 표시 */}
+          {(form.protocol === 'rdp' || form.protocol === 'ssh') && (
             <div className="field">
               <label>사용자명</label>
               <input
@@ -97,15 +126,18 @@ export default function ConnectPage() {
             </div>
           )}
 
-          <div className="field">
-            <label>비밀번호</label>
-            <input
-              type="password"
-              value={form.password}
-              onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-              autoComplete="current-password"
-            />
-          </div>
+          {/* 비밀번호: web 제외 */}
+          {!isWeb && (
+            <div className="field">
+              <label>비밀번호</label>
+              <input
+                type="password"
+                value={form.password}
+                onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+                autoComplete="current-password"
+              />
+            </div>
+          )}
 
           <button type="submit" className="btn-primary">
             연결
