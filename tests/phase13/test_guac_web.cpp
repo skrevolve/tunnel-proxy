@@ -51,6 +51,14 @@
 #include "core/guac_parser.h"
 
 #include <gtest/gtest.h>
+#include <csignal>
+
+// disconnect() 시 MockCdpServer가 닫힌 fd에 write하면 SIGPIPE가 발생한다.
+// 네트워크 서버에서 표준적인 처리: 프로세스 전역으로 무시하고 EPIPE 에러로 받는다.
+static const bool kIgnoreSigPipe = []() {
+    signal(SIGPIPE, SIG_IGN);
+    return true;
+}();
 
 // stb — 선언만 (구현은 guac_web.cpp 번역 단위에 있음)
 #pragma GCC diagnostic push
