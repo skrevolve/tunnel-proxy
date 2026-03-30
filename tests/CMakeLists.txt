@@ -156,3 +156,43 @@ add_executable(test_phase11
 target_include_directories(test_phase11 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_phase11 GTest::gtest_main pthread)
 gtest_discover_tests(test_phase11 PROPERTIES LABELS "phase11")
+
+# ─────────────────────────────────────────
+# Phase 13 테스트 (GuacWebClient E2E — MockCdpServer)
+# ─────────────────────────────────────────
+add_executable(test_phase13
+    phase13/test_guac_web.cpp
+    ../src/guac_web.cpp
+    ../src/guac_websocket.cpp
+    ../src/guac_parser.cpp
+    ../src/guac_rdp.cpp
+    ../src/guac_ssh.cpp
+    ../src/guac_vnc.cpp
+    ../src/utils/logger.cpp
+)
+target_include_directories(test_phase13 SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/winpr/include
+    ${libssh2_SOURCE_DIR}/include
+    ${libvncserver_SOURCE_DIR}
+    ${libvncserver_BINARY_DIR}
+    ${stb_SOURCE_DIR}
+)
+target_link_libraries(test_phase13
+    GTest::gtest_main
+    freerdp
+    winpr
+    libssh2_static
+    vncclient
+    ZLIB::ZLIB
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(test_phase13 PROPERTIES LABELS "phase13"
+    ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=0"
+)
