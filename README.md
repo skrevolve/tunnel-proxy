@@ -155,6 +155,184 @@ make -j$(nproc)
 
 외부 의존성은 cmake 시점에 FetchContent로 자동 다운로드된다. apt 설치 불필요.
 
+빌드 결과물:
+
+| 바이너리 | 용도 |
+|----------|------|
+| `build/proxy` | 게이트웨이 서버 |
+| `build/agent` | 리버스 터널 에이전트 (NAT 뒤 머신에 배포) |
+
+---
+
+## 워크플로우
+
+### 기본 구성 — 브라우저 원격 접속
+
+공개 서버에 `proxy`를 올리면 브라우저에서 SSH/RDP/VNC/웹에 바로 접속할 수 있다.
+
+```
+브라우저
+  │ WebSocket (ws://서버IP:8765)
+  ▼
+┌─────────────────────────────────────────────┐
+│  proxy (공개 서버)                           │
+│                                             │
+│  GuacWebSocketGateway :8765                 │
+│   ├─ ssh ──────────────────────▶ SSH 서버   │
+│   ├─ rdp ──────────────────────▶ RDP 서버   │
+│   ├─ vnc ──────────────────────▶ VNC 서버   │
+│   └─ web ──▶ Chromium headless ─▶ URL       │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+### 리버스 터널 구성 — NAT 뒤 내부망 접근
+
+내부 서버에 직접 들어갈 수 없을 때. 에이전트가 먼저 서버에 연결을 맺어두고, 서버가 그 연결을 역방향으로 이용한다.
+
+```
+브라우저 / 외부 클라이언트
+  │ :8765 (Guacamole) 또는 :9901 (TCP 터널)
+  ▼
+┌──────────────────────────────────────────────────────┐
+│  proxy (공개 서버)                                    │
+│                                                      │
+│  TunnelServer :9900 ◀─────────────────────────────┐  │
+│  (에이전트 대기)                                    │  │
+│                                                    │  │
+│  외부 클라이언트 :9901 ──▶ 터널 ──────────────────┐│  │
+└────────────────────────────────────────────────────┼┼─┘
+                                                     ││
+                              역방향 TCP 연결 (유지) ││
+                                                     ▼│
+                                          ┌───────────┴──────────┐
+                                          │  agent (NAT 뒤)       │
+                                          │  TunnelAgent          │
+                                          │   └──▶ 내부 서버:PORT │
+                                          └──────────────────────┘
+```
+
+---
+
+## 환경 설정 및 사용 방법
+
+### 1. 서버 설정
+
+**공개 서버에서 실행**
+
+```bash
+git clone https://github.com/skrevolve/tunnel-proxy
+cd tunnel-proxy
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..   # Chromium 자동 설치 포함
+make -j$(nproc)
+```
+
+**브라우저 원격 접속만 필요한 경우 (리버스 터널 없이)**
+
+```json
+// config.json
+{
+  "mode":        "tcp",
+  "local_port":  8080,
+  "target_ip":   "127.0.0.1",
+  "target_port": 8000
+}
+```
+
+```bash
+./proxy
+# :8080 TCP 포워딩 + :8765 Guacamole 게이트웨이 시작
+```
+
+**리버스 터널 서버로 운영**
+
+```json
+// config.json
+{
+  "mode":       "tunnel-server",
+  "agent_port": 9900,
+  "proxy_port": 9901,
+  "local_port": 9900,
+  "target_ip":  "127.0.0.1",
+  "target_port": 8000
+}
+```
+
+```bash
+./proxy
+# :9900 에이전트 연결 대기
+# :9901 외부 클라이언트 연결 대기
+# :8765 Guacamole 게이트웨이 시작
+```
+
+---
+
+### 2. 에이전트 설정 (NAT 뒤 머신)
+
+서버 바이너리를 배포할 필요 없다. `agent` 바이너리만 올린다.
+
+```bash
+# 에이전트 머신에 바이너리 복사
+scp build/agent user@내부머신:/opt/tunnel-agent/
+
+# agent.json 작성
+{
+  "server_ip":  "공개서버_IP",
+  "local_port": 9900,
+  "agent_id":   "my-agent",
+  "target_ip":  "127.0.0.1",
+  "target_port": 22
+}
+
+# 실행 (서버가 올라와 있으면 자동 연결, 끊기면 자동 재연결)
+./agent -c agent.json
+```
+
+---
+
+### 3. 프론트엔드 접속
+
+```bash
+cd frontend
+npm install
+npm run dev     # http://localhost:5173
+```
+
+브라우저에서 접속 후 다음을 입력한다:
+
+| 항목 | 값 |
+|------|----|
+| 게이트웨이 URL | `ws://서버IP:8765` |
+| 프로토콜 | SSH / RDP / VNC / WEB 중 선택 |
+| 호스트/포트 | 접속 대상 서버 |
+| WEB일 경우 | URL 직접 입력 |
+
+---
+
+### 4. TLS 적용 (선택)
+
+```bash
+./scripts/gen_cert.sh   # certs/ 디렉토리에 인증서 생성
+```
+
+```json
+// config.json
+{
+  "mode":       "tls",
+  "local_port": 8443,
+  "target_ip":  "127.0.0.1",
+  "target_port": 8000,
+  "cert_file":  "certs/server.crt",
+  "key_file":   "certs/server.key"
+}
+```
+
+```bash
+./proxy
+```
+
 ---
 
 ## 테스트
@@ -193,42 +371,34 @@ cd build && ctest --output-on-failure
 
 ```
 tunnel-proxy/
-├── include/
-│   ├── core/
-│   │   ├── basic_proxy.h       # TCP 멀티스레드 프록시
-│   │   ├── epoll_proxy.h       # epoll ET + splice zero-copy
-│   │   ├── tls_proxy.h         # OpenSSL TLS 프록시
-│   │   ├── udp_proxy.h         # UDP 세션 테이블 프록시
-│   │   ├── tunnel_protocol.h   # 바이너리 프레임 프로토콜
-│   │   ├── tunnel_agent.h      # 역방향 연결 에이전트
-│   │   ├── tunnel_server.h     # 에이전트 수신 + 세션 라우터
-│   │   ├── mtls_context.h      # mTLS SSL_CTX + CN 추출
-│   │   ├── jwt_verifier.h      # HS256/RS256 JWT 검증
-│   │   └── access_policy.h     # 접근 제어 정책 (first-match)
-│   └── utils/
-│       ├── config.h
-│       └── logger.h
+├── include/core/
+│   ├── basic_proxy.h       # TCP 멀티스레드 프록시
+│   ├── epoll_proxy.h       # epoll ET + splice zero-copy
+│   ├── tls_proxy.h         # OpenSSL TLS 프록시
+│   ├── udp_proxy.h         # UDP 세션 테이블 프록시
+│   ├── tunnel_protocol.h   # 바이너리 프레임 프로토콜
+│   ├── tunnel_agent.h      # 역방향 연결 에이전트
+│   ├── tunnel_server.h     # 에이전트 수신 + 세션 라우터
+│   ├── mtls_context.h      # mTLS SSL_CTX + CN 추출
+│   ├── jwt_verifier.h      # HS256/RS256 JWT 검증
+│   ├── access_policy.h     # 접근 제어 정책 (first-match)
+│   ├── guac_websocket.h    # Guacamole WebSocket 게이트웨이
+│   └── guac_web.h          # Remote Browser Isolation (CDP)
 ├── src/
-│   ├── main.cpp
-│   ├── basic_proxy.cpp
-│   ├── epoll_proxy.cpp
-│   ├── tls_proxy.cpp
-│   ├── udp_proxy.cpp
-│   ├── tunnel_protocol.cpp
-│   ├── tunnel_agent.cpp
-│   ├── tunnel_server.cpp
-│   ├── mtls_context.cpp
-│   ├── jwt_verifier.cpp
-│   ├── access_policy.cpp
-│   └── utils/
-│       ├── config.cpp
-│       └── logger.cpp
+│   ├── main.cpp            # proxy 바이너리 진입점 (tcp/tls/tunnel-server)
+│   ├── agent_main.cpp      # agent 바이너리 진입점
+│   └── ...
+├── frontend/               # React 웹 클라이언트
+│   └── src/
+│       ├── pages/          # ConnectPage, SessionPage
+│       ├── components/     # TerminalViewer, CanvasViewer
+│       └── hooks/          # useGuacamole
 ├── tests/
-│   ├── phase1/ … phase7/       # 각 phaseN.md에 시나리오 설명
+│   └── phase1/ … phase13/
 ├── scripts/
-│   ├── build.sh
-│   ├── test.sh
-│   └── gen_cert.sh
-├── config.json
+│   ├── gen_cert.sh         # TLS 인증서 생성
+│   └── setup_chromium.sh   # Chrome for Testing 자동 설치
+├── config.json             # proxy 설정
+├── agent.json              # agent 설정
 └── CMakeLists.txt
 ```
