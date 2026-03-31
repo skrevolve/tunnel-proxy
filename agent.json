@@ -1,0 +1,12 @@
+{
+  "server_ip":  "127.0.0.1",
+  "local_port": 9900,
+  "agent_id":   "agent-1",
+  "verbose":    true,
+  "log_file":   "agent.log",
+
+  "_comment": "local_port = 터널 서버의 agent_port (서버의 config.json agent_port와 일치해야 함)",
+
+  "target_ip":   "127.0.0.1",
+  "target_port": 8000
+}

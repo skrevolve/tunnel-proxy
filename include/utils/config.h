@@ -60,6 +60,24 @@ public:
     /** 로그를 기록할 파일 경로. 빈 문자열이면 콘솔에만 출력 */
     std::string get_log_file() const { return log_file_; }
 
+    // ── TLS 모드 (mode = "tls") ───────────────────────────────────────────────
+    /** 서버 인증서 경로 (PEM). gen_cert.sh로 생성 */
+    std::string get_cert_file() const { return cert_file_; }
+    /** 서버 개인키 경로 (PEM) */
+    std::string get_key_file() const { return key_file_; }
+
+    // ── 터널 서버 모드 (mode = "tunnel-server") ───────────────────────────────
+    /** 에이전트 역방향 연결 수신 포트 (기본 9900) */
+    int get_agent_port() const { return agent_port_; }
+    /** 외부 클라이언트 연결 수신 포트 (0이면 비활성) */
+    int get_proxy_port() const { return proxy_port_; }
+
+    // ── 터널 에이전트 모드 (mode = "tunnel-agent") ───────────────────────────
+    /** 터널 서버 IP */
+    std::string get_server_ip() const { return server_ip_; }
+    /** 에이전트 고유 식별자 */
+    std::string get_agent_id() const { return agent_id_; }
+
 private:
     // Config 객체는 load_from_file()로만 생성 가능하도록
     // 기본 생성자를 private으로 유지한다.
@@ -71,4 +89,16 @@ private:
     std::string mode_;         // 선택 필드 — 기본값 "tcp"
     bool        verbose_;      // 선택 필드 — 기본값 false
     std::string log_file_;     // 선택 필드 — 기본값 "" (파일 출력 없음)
+
+    // TLS
+    std::string cert_file_;    // 선택 — 기본값 "certs/server.crt"
+    std::string key_file_;     // 선택 — 기본값 "certs/server.key"
+
+    // tunnel-server
+    int agent_port_ = 9900;    // 선택 — 기본값 9900
+    int proxy_port_ = 0;       // 선택 — 기본값 0 (비활성)
+
+    // tunnel-agent
+    std::string server_ip_;    // 선택 — 기본값 "127.0.0.1"
+    std::string agent_id_;     // 선택 — 기본값 "agent-1"
 };

@@ -40,9 +40,21 @@ Config Config::load_from_file(const std::string& path) {
     config.target_port_ = j.at("target_port").get<int>();
 
     // 선택 필드: 없으면 기본값 사용
-    config.mode_     = j.value("mode",     "tcp");   // Phase 5까지는 tcp만 사용
-    config.verbose_  = j.value("verbose",  false);   // false면 INFO 이상만 출력
-    config.log_file_ = j.value("log_file", "");      // 빈 문자열이면 파일 출력 안 함
+    config.mode_     = j.value("mode",     "tcp");
+    config.verbose_  = j.value("verbose",  false);
+    config.log_file_ = j.value("log_file", "");
+
+    // TLS 모드 전용
+    config.cert_file_ = j.value("cert_file", "certs/server.crt");
+    config.key_file_  = j.value("key_file",  "certs/server.key");
+
+    // tunnel-server 모드 전용
+    config.agent_port_ = j.value("agent_port", 9900);
+    config.proxy_port_ = j.value("proxy_port", 0);
+
+    // tunnel-agent 모드 전용
+    config.server_ip_ = j.value("server_ip", std::string("127.0.0.1"));
+    config.agent_id_  = j.value("agent_id",  std::string("agent-1"));
 
     return config;
     // 반환 시 config 객체가 복사(또는 NRVO 최적화로 이동)된다.
