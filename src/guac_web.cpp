@@ -182,6 +182,13 @@ bool GuacWebClient::is_connected() const {
 // ── Chromium 탐지 ─────────────────────────────────────────────────────────
 
 std::string GuacWebClient::find_chromium() {
+    // CMake configure 시 setup_chromium.sh가 탐지/다운로드한 경로를 최우선으로 사용.
+    // 시스템에 없어도 Chrome for Testing이 다운로드되어 있으면 바로 사용 가능.
+#ifdef CHROMIUM_PATH
+    if (::access(CHROMIUM_PATH, X_OK) == 0) return CHROMIUM_PATH;
+#endif
+
+    // fallback: 런타임 PATH 탐색 (CHROMIUM_PATH 미정의 또는 경로 변경 시)
     static const char* candidates[] = {
         "chromium-browser", "chromium", "google-chrome", nullptr
     };

@@ -127,6 +127,21 @@ if(NOT stb_POPULATED)
     FetchContent_Populate(stb)
 endif()
 
+# ── Chromium 자동 탐지/설치 (Phase 13 — web 프로토콜) ──────────────────────
+# configure 시 setup_chromium.sh를 실행해 Chromium 경로를 확정한다.
+# 경로가 확정되면 CHROMIUM_PATH 매크로로 컴파일에 전달해 런타임 탐색 없이 바로 사용.
+# 탐지 실패 시 경고만 출력하고 빌드는 계속 진행한다 (런타임에 fallback 탐색).
+execute_process(
+    COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/setup_chromium.sh
+    OUTPUT_VARIABLE CHROMIUM_FOUND_PATH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_VARIABLE  CHROMIUM_SETUP_LOG
+    RESULT_VARIABLE CHROMIUM_SETUP_RESULT
+)
+if(CHROMIUM_SETUP_LOG)
+    message(STATUS "${CHROMIUM_SETUP_LOG}")
+endif()
+
 # 소스 파일 목록
 set(SOURCES
     src/main.cpp
@@ -180,6 +195,14 @@ target_link_libraries(proxy
     pthread
     nlohmann_json::nlohmann_json
 )
+
+# Chromium 경로를 컴파일 정의로 전달 (add_executable 이후에만 호출 가능)
+if(CHROMIUM_SETUP_RESULT EQUAL 0 AND CHROMIUM_FOUND_PATH)
+    message(STATUS "Chromium: ${CHROMIUM_FOUND_PATH}")
+    target_compile_definitions(proxy PRIVATE CHROMIUM_PATH="${CHROMIUM_FOUND_PATH}")
+else()
+    message(WARNING "Chromium not found — web protocol will fall back to runtime PATH search")
+endif()
 
 # 테스트
 enable_testing()
