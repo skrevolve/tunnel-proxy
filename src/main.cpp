@@ -1,51 +1,42 @@
 #include <iostream>
 #include <csignal>
 #include "core/epoll_proxy.h"
+#include "core/tls_proxy.h"
+#include "core/tunnel_server.h"
 #include "core/guac_websocket.h"
 #include "utils/config.h"
 #include "utils/logger.h"
 
-// ── 전역 프록시 포인터 ─────────────────────────────────────────────────────────
-//
-// 시그널 핸들러(signal_handler)는 일반 함수여야 하고,
-// 클래스 멤버나 람다를 직접 등록할 수 없다.
-// 핸들러 안에서 proxy.stop()을 호출하려면 proxy에 접근할 방법이 필요한데,
-// 시그널 핸들러는 인자로 signum만 받을 수 있어 proxy를 전달할 수 없다.
-// 그래서 전역 포인터를 통해 접근한다.
-//
-// 주의: 시그널 핸들러에서 호출 가능한 함수는 async-signal-safe 함수로 제한된다.
-//       stop()은 atomic 쓰기 + shutdown() 호출이므로 사실상 안전하게 동작하나,
-//       엄밀히는 async-signal-safe가 보장된 write() + _Exit() 정도만 권장된다.
-//       Phase 11(안정성)에서 self-pipe trick으로 개선 예정.
-EpollProxy*            g_proxy   = nullptr;
-proxy::GuacWebSocketGateway* g_gateway = nullptr;
-
-// ── 시그널 핸들러 ──────────────────────────────────────────────────────────────
+// ── 전역 포인터 (시그널 핸들러용) ──────────────────────────────────────────────
+static EpollProxy*                    g_epoll_proxy = nullptr;
+static TlsProxy*                      g_tls_proxy   = nullptr;
+static proxy::TunnelServer*           g_tunnel_srv  = nullptr;
+static proxy::GuacWebSocketGateway*   g_gateway     = nullptr;
 
 void signal_handler(int signum) {
-    // SIGINT (2) : Ctrl+C 입력 시 발생
-    // SIGTERM(15): kill 명령이나 systemd stop 시 발생
     Logger::info("Received signal " + std::to_string(signum) + ", shutting down...");
-    if (g_gateway) g_gateway->stop();
-    if (g_proxy)   g_proxy->stop();
+    if (g_gateway)     g_gateway->stop();
+    if (g_epoll_proxy) g_epoll_proxy->stop();
+    if (g_tls_proxy)   g_tls_proxy->stop();
+    if (g_tunnel_srv)  g_tunnel_srv->stop();
 }
-
-// ── 사용법 출력 ────────────────────────────────────────────────────────────────
 
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [OPTIONS]\n"
               << "Options:\n"
               << "  -c, --config <file>   Config file path (default: config.json)\n"
               << "  -h, --help            Show this help\n"
-              << "  -v, --verbose         Verbose logging\n";
+              << "\n"
+              << "Modes (config.json \"mode\" field):\n"
+              << "  tcp            — EpollProxy:   TCP 포워딩 (기본)\n"
+              << "  tls            — TlsProxy:     TLS 암호화 TCP 포워딩\n"
+              << "  tunnel-server  — TunnelServer: 리버스 터널 서버\n"
+              << "\n"
+              << "Guacamole WebSocket gateway always starts on port 8765.\n"
+              << "For tunnel agent, use the 'agent' binary.\n";
 }
 
-// ── 진입점 ─────────────────────────────────────────────────────────────────────
-
 int main(int argc, char* argv[]) {
-    // 명령줄 인자 파싱
-    // -c / --config: 설정 파일 경로 지정 (기본값: config.json)
-    // -h / --help  : 사용법 출력 후 종료
     std::string config_path = "config.json";
 
     for (int i = 1; i < argc; i++) {
@@ -54,68 +45,77 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 0;
         } else if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
-            config_path = argv[++i];  // 다음 인자를 경로로 사용
+            config_path = argv[++i];
         }
     }
 
-    // try-catch로 전체를 감싸는 이유:
-    //   소켓 생성, 파일 파싱 등 초기화 단계에서 예외가 발생할 수 있다.
-    //   예외를 잡아 Logger::error로 출력하고 종료 코드 1을 반환한다.
-    //   예외를 잡지 않으면 std::terminate()가 호출되어 스택 트레이스가
-    //   출력되고 종료되는데, 메시지가 불친절하다.
     try {
-        // 1단계: 설정 로드
         Logger::info("Loading config from: " + config_path);
         auto config = Config::load_from_file(config_path);
 
-        // verbose=true면 DEBUG 레벨로 낮춰 상세 로그 활성화
-        if (config.is_verbose()) {
-            Logger::set_level(Logger::Level::DEBUG);
-        }
-
-        // 로그 파일 경로 설정 (빈 문자열이면 콘솔만 출력)
+        if (config.is_verbose()) Logger::set_level(Logger::Level::DEBUG);
         Logger::set_log_file(config.get_log_file());
 
-        // 2단계: 프록시 생성 (생성자에서 소켓 바인딩까지 완료)
-        // Phase 3-A 기준: EpollProxy (epoll ET + splice zero-copy 포워딩)
-        // local_port, target_ip, target_port 모두 config.json에서 읽어온다.
-        Logger::info("Starting proxy...");
-        Logger::info("Local port: " + std::to_string(config.get_local_port()));
-        Logger::info("Target: " + config.get_target_ip() + ":" +
-                     std::to_string(config.get_target_port()));
+        const std::string mode = config.get_mode();
+        Logger::info("Mode: " + mode);
 
-        EpollProxy proxy(
-            config.get_local_port(),
-            config.get_target_ip(),
-            config.get_target_port()
-        );
-
-        // Guacamole WebSocket 게이트웨이 시작 (포트 8765)
+        // ── Guacamole WebSocket 게이트웨이 — 모든 모드에서 공통 시작 ───────────
         proxy::GuacWebSocketGateway gateway;
         gateway.start(8765);
         g_gateway = &gateway;
         Logger::info("Guacamole WebSocket gateway listening on port 8765");
 
-        // 3단계: 시그널 핸들러 등록
-        // proxy가 스택에 있으므로 g_proxy에 주소를 저장한다.
-        // std::signal보다 sigaction이 더 안전하지만,
-        // Phase 11(안정성)에서 sigaction + self-pipe trick으로 개선 예정.
-        g_proxy = &proxy;
         std::signal(SIGINT,  signal_handler);
         std::signal(SIGTERM, signal_handler);
 
-        // 4단계: 프록시 실행 (Ctrl+C 또는 stop()이 호출될 때까지 블로킹)
-        proxy.run();
+        // ── 모드별 컴포넌트 시작 ─────────────────────────────────────────────
+        if (mode == "tcp") {
+            Logger::info("TCP proxy: " + config.get_target_ip() + ":"
+                         + std::to_string(config.get_target_port())
+                         + " ← port " + std::to_string(config.get_local_port()));
 
-        // run()이 반환되면 정상 종료
-        Logger::info("Proxy stopped");
-        Logger::info("Total connections: " +
-                     std::to_string(proxy.get_total_connections()));
+            EpollProxy proxy(config.get_local_port(),
+                             config.get_target_ip(),
+                             config.get_target_port());
+            g_epoll_proxy = &proxy;
+            proxy.run();
+            Logger::info("Proxy stopped. Total connections: "
+                         + std::to_string(proxy.get_total_connections()));
+
+        } else if (mode == "tls") {
+            Logger::info("TLS proxy: " + config.get_target_ip() + ":"
+                         + std::to_string(config.get_target_port())
+                         + " ← port " + std::to_string(config.get_local_port()));
+            Logger::info("Cert: " + config.get_cert_file()
+                         + ", Key: " + config.get_key_file());
+
+            TlsProxy proxy(config.get_local_port(),
+                           config.get_target_ip(),
+                           config.get_target_port(),
+                           config.get_cert_file(),
+                           config.get_key_file());
+            g_tls_proxy = &proxy;
+            proxy.run();
+
+        } else if (mode == "tunnel-server") {
+            Logger::info("Tunnel server: agent_port=" + std::to_string(config.get_agent_port())
+                         + ", proxy_port=" + std::to_string(config.get_proxy_port()));
+
+            proxy::TunnelServer server(config.get_agent_port(),
+                                       config.get_proxy_port());
+            g_tunnel_srv = &server;
+            server.run();
+
+        } else {
+            Logger::error("Unknown mode: " + mode
+                          + ". Valid modes: tcp, tls, tunnel-server");
+            return 1;
+        }
 
     } catch (const std::exception& e) {
         Logger::error(std::string("Fatal error: ") + e.what());
-        return 1;  // 비정상 종료 (쉘에서 $?로 확인 가능)
+        return 1;
     }
 
-    return 0;  // 정상 종료
+    return 0;
 }

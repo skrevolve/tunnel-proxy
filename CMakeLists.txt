@@ -204,6 +204,23 @@ else()
     message(WARNING "Chromium not found — web protocol will fall back to runtime PATH search")
 endif()
 
+# ── agent 바이너리 (TunnelAgent 전용) ─────────────────────────────────────────
+# proxy 바이너리와 달리 FreeRDP/libssh2/libvncserver 등 Guacamole 의존성이 없다.
+# NAT 뒤 머신에 단독 배포하는 경량 바이너리.
+add_executable(agent
+    src/agent_main.cpp
+    src/tunnel_agent.cpp
+    src/tunnel_protocol.cpp
+    src/tunnel_metrics.cpp
+    src/utils/config.cpp
+    src/utils/logger.cpp
+)
+target_include_directories(agent PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(agent
+    nlohmann_json::nlohmann_json
+    pthread
+)
+
 # 테스트
 enable_testing()
 add_subdirectory(tests)
