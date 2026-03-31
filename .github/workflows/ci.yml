@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q cmake g++ libssl-dev zlib1g-dev openssh-server
+          sudo apt-get install -y -q cmake g++ libssl-dev zlib1g-dev libcurl4-openssl-dev openssh-server
 
       - name: Configure SSH test server
         run: |
