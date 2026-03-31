@@ -217,7 +217,7 @@ make -j$(nproc)
 
 ## 환경 설정 및 사용 방법
 
-### 1. 서버 설정
+### 1. 빌드
 
 ```bash
 git clone https://github.com/skrevolve/tunnel-proxy
@@ -227,73 +227,32 @@ cmake -DCMAKE_BUILD_TYPE=Release ..   # Chromium 자동 설치 포함
 make -j$(nproc)
 ```
 
-**브라우저 원격 접속 (기본)**
+### 2. 서버 실행 (공개 서버)
 
 ```json
 // config.json
 {
-  "mode":        "tcp",
-  "local_port":  8080,
-  "target_ip":   "127.0.0.1",
-  "target_port": 8000
-}
-```
-
-```bash
-./proxy
-# :8080 TCP 포워딩 + :8765 Guacamole 게이트웨이 시작
-```
-
-**리버스 터널 서버**
-
-```json
-// config.json
-{
-  "mode":       "tunnel-server",
   "agent_port": 9900,
   "proxy_port": 9901,
-  "local_port": 9900,
-  "target_ip":  "127.0.0.1",
-  "target_port": 8000
+  "guac_port":  8765
 }
 ```
 
 ```bash
 ./proxy
-# :9900 에이전트 연결 대기 + :9901 외부 클라이언트 대기 + :8765 Guacamole
+# :9900  에이전트 역방향 연결 대기 (TunnelServer)
+# :9901  외부 클라이언트 터널 진입 (TunnelServer)
+# :8765  브라우저 WebSocket 연결  (GuacWebSocketGateway)
 ```
 
-**TLS 암호화**
-
-```json
-// config.json
-{
-  "mode":       "tls",
-  "local_port": 8443,
-  "target_ip":  "127.0.0.1",
-  "target_port": 8000,
-  "cert_file":  "certs/server.crt",
-  "key_file":   "certs/server.key"
-}
-```
-
-```bash
-./scripts/gen_cert.sh   # 인증서 생성 (최초 1회)
-./proxy
-```
-
----
-
-### 2. 에이전트 설정 (NAT 뒤 머신)
+### 3. 에이전트 실행 (NAT 뒤 머신)
 
 ```json
 // agent.json
 {
-  "server_ip":  "공개서버_IP",
-  "local_port": 9900,
-  "agent_id":   "my-agent",
-  "target_ip":  "127.0.0.1",
-  "target_port": 22
+  "server_ip":   "공개서버_IP",
+  "server_port": 9900,
+  "agent_id":    "my-agent"
 }
 ```
 
@@ -301,9 +260,7 @@ make -j$(nproc)
 ./agent -c agent.json   # 지수 백오프 자동 재연결 포함
 ```
 
----
-
-### 3. 프론트엔드 접속
+### 4. 브라우저 접속
 
 ```bash
 cd frontend && npm install && npm run dev

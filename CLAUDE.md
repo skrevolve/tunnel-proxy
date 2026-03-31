@@ -164,7 +164,7 @@ Guacamole는 RDP/VNC/SSH만 지원한다. HTTPS 웹페이지 원격 접근을 �
 
 `GuacWebClient`는 `GuacVncClient`와 동일한 구조다. 픽셀 소스만 libvncclient 대신 CDP `Page.captureScreenshot`으로 교체된다.
 
-Chromium은 system dependency로 취급한다 (OpenSSL과 동일). 설치: `apt install chromium-browser`
+Chromium은 cmake configure 시 `scripts/setup_chromium.sh`가 자동으로 탐지/설치한다. apt 불필요.
 
 | 세션 | 브랜치 | 작업 | 왜 필요한가 |
 |------|--------|------|-------------|
@@ -326,7 +326,7 @@ Total Test time (real) = 0.XXs
 - GCC 11+ (C++17)
 - OpenSSL 3.x
 - pthread
-- Chromium (Phase 13 전용) — FetchContent 불가한 바이너리. `which chromium-browser || which chromium`으로 경로 탐지. 설치: `apt install chromium-browser`
+- Chromium (Phase 13 전용) — cmake configure 시 `scripts/setup_chromium.sh` 자동 탐지/설치 (`~/.local/share/tunnel-proxy/chromium/`)
 
 FetchContent로 관리하는 라이브러리:
 - nlohmann/json v3.11.3
@@ -362,12 +362,16 @@ cd build && ctest --output-on-failure
 
 테스트 실패 상태로 커밋 금지.
 
-Phase 1 동작 확인:
+동작 확인:
 ```bash
-# 터미널 1: nc -l 80
-# 터미널 2: ./proxy --config ../config.json
-# 터미널 3: nc localhost 8080
-# → 터미널 1↔3 양방향 데이터 전달 확인
+# 서버 실행
+./proxy                  # :9900 TunnelServer + :8765 GuacWebSocketGateway
+
+# 에이전트 실행 (별도 머신 또는 터미널)
+./agent -c agent.json    # proxy:9900으로 역방향 연결
+
+# 브라우저 접속
+cd frontend && npm run dev   # http://localhost:5173 → ws://서버:8765
 ```
 
 ---
