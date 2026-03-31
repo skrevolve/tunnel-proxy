@@ -8,15 +8,15 @@ VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
 1. **리버스 터널** — 클라이언트가 NAT 뒤에 있어도 서버에서 연결 가능하게
 2. **Zero Trust 인증** — 네트워크 신뢰 없이 매 요청마다 인증 (mTLS/JWT)
 3. **Guacamole 프로토콜** — 서버에서 직접 렌더링해서 브라우저로 전달 (RDP/VNC/SSH 웹화)
-4. **Remote Browser Isolation** — Guacamole 커스텀 프로토콜로 HTTPS 웹 원격 접근 구현. `GuacWebClient`가 Chromium headless를 CDP로 제어해 스크린샷을 캡처하고, 기존 Guacamole blob 스트리밍으로 브라우저 canvas에 전달
+4. **HTTP 웹 프록시** — Guacamole 커스텀 `web` 프로토콜로 HTTP/HTTPS 페이지를 게이트웨이에서 가져와 브라우저에 전달. 기본은 `GuacHttpClient`(libcurl 직접 요청), 선택적으로 `GuacWebClient`(Chromium headless CDP) 전환 가능
 
-최종 결과물: Cloudflare Tunnel + Apache Guacamole + Remote Browser Isolation을 C++로 직접 만든 것
+최종 결과물: Cloudflare Tunnel + Apache Guacamole + HTTP 웹 프록시를 C++로 직접 만든 것
 
 ---
 
 ## 현재 개발 단계
 
-**Phase 13 다음** — Remote Browser Isolation
+**Phase 14 진행 중** — HTTP 웹 프록시 (GuacHttpClient)
 
 - [x] Phase 1 — 기본 TCP 프록시 (멀티스레드) **완료**
 - [x] Phase 2 — epoll 비동기 I/O **완료**
@@ -30,8 +30,9 @@ VPN/원격접속 기술을 학습하고 직접 구현하는 프로젝트.
 - [ ] ~~Phase 9 — 컨트롤 플레인~~ **보류** (SaaS 구조 전제, 현재 목표와 맞지 않음)
 - [ ] ~~Phase 10 — REST API~~ **보류** (동일 이유)
 - [x] Phase 11 — 재연결 및 안정성 **완료**
-- [ ] Phase 12 — 배포 **보류** (Phase 13 완료 후 진행)
-- [ ] Phase 13 — Remote Browser Isolation (GuacWebClient + Chromium CDP) **다음**
+- [ ] Phase 12 — 배포 **보류** (Phase 14 완료 후 진행)
+- [x] Phase 13 — Remote Browser Isolation (GuacWebClient + Chromium CDP) **완료**
+- [ ] Phase 14 — HTTP 웹 프록시 (GuacHttpClient + 터널 라우팅 통합) **다음**
 
 ---
 
@@ -156,23 +157,48 @@ PR을 올린 뒤 다음 Phase 작업을 이어서 시작하지 않는다.
 | 12-B | `build/systemd` | systemd 서비스 파일 (자동 시작 / 재시작 정책) | 리눅스 서버에서 프로세스를 데몬으로 관리. 서버 재부팅 후 자동 복구 |
 | 12-C | `build/compose` | docker-compose (서버 + 게이트웨이 + 설정 볼륨) | 서버/게이트웨이를 한 번에 올리는 로컬 개발 및 배포 환경 구성 |
 
-### Phase 13 — Remote Browser Isolation (GuacWebClient + Chromium CDP)
+### Phase 13 — Remote Browser Isolation (GuacWebClient + Chromium CDP) **완료**
 
-Guacamole는 RDP/VNC/SSH만 지원한다. HTTPS 웹페이지 원격 접근을 위해 `GuacWebClient`를 새 Guacamole 커스텀 프로토콜로 추가한다.
+Guacamole 커스텀 `web` 프로토콜로 Chromium headless CDP를 제어해 스크린샷을 캡처하고 blob 스트리밍으로 브라우저 canvas에 전달.
+Chromium은 cmake configure 시 `scripts/setup_chromium.sh`가 자동으로 탐지/설치한다.
 
-구조: `connect,web,https://...;` → `GuacWebClient` → Chromium headless(CDP) → 스크린샷 → blob 스트리밍 → 브라우저 canvas
+| 세션 | 브랜치 | 작업 |
+|------|--------|------|
+| 13-A | `feat/guac-web-cdp` | Chrome fork/exec + CDP WebSocket + 페이지 로드 |
+| 13-B | `feat/guac-web-stream` | captureScreenshot → JPEG blob 스트리밍 + 라우팅 |
+| 13-C | `feat/guac-web-input` | 마우스/키보드 → CDP Input 이벤트 주입 |
+| 13-D | `feat/guac-web-delta` | 전 프레임 비교 delta 압축 전송 |
+| 13-E | `test/guac-web-e2e` | E2E 테스트 |
 
-`GuacWebClient`는 `GuacVncClient`와 동일한 구조다. 픽셀 소스만 libvncclient 대신 CDP `Page.captureScreenshot`으로 교체된다.
+### Phase 14 — HTTP 웹 프록시 (GuacHttpClient + 터널 라우팅 통합)
 
-Chromium은 cmake configure 시 `scripts/setup_chromium.sh`가 자동으로 탐지/설치한다. apt 불필요.
+Phase 13의 Chromium 방식은 프로세스 오버헤드가 크고 터널 라우팅이 빠져있다.
+Phase 14는 두 가지 문제를 해결한다:
+
+1. **GuacHttpClient** — libcurl 기반 HTTP GET. `response,<status>,<content-type>,<base64-body>;` Guacamole instruction으로 반환. 기본 `web` 구현.
+2. **터널 라우팅 통합** — GuacWebSocketGateway가 TunnelServer를 참조해, NAT 뒤 에이전트를 거쳐 내부 웹 서비스에 도달할 수 있도록 연결.
+3. **web_renderer 설정** — config.json의 `"web_renderer": "http"` (기본) 또는 `"chromium"` 으로 구현체 선택.
+
+Guacamole `web` 프로토콜 흐름:
+```
+브라우저 → connect,web,https://내부서버/path;
+         → GuacWebSocketGateway
+              ├─ web_renderer=http   → GuacHttpClient → (터널 or 직접) → HTTP GET
+              └─ web_renderer=chromium → GuacWebClient → Chromium CDP
+         → response,200,text/html,<base64>;
+브라우저 → iframe src=data:... 렌더링
+```
+
+새 Guacamole instruction:
+```
+response,<status_code>,<content-type>,<base64-encoded-body>;
+```
 
 | 세션 | 브랜치 | 작업 | 왜 필요한가 |
 |------|--------|------|-------------|
-| 13-A | `feat/guac-web-cdp` | Chrome 프로세스 fork/exec + CDP WebSocket 클라이언트 + 페이지 로드 | Chromium을 headless로 구동하고 CDP로 제어하는 기반. `--remote-debugging-port`로 CDP 포트 열기 |
-| 13-B | `feat/guac-web-stream` | `Page.captureScreenshot` 루프 → JPEG blob 스트리밍 + `GuacWebSocketGateway` 라우팅 추가 | 스크린샷을 기존 Guacamole blob 경로로 전송. 프론트엔드 canvas 렌더링은 RDP/VNC와 동일 |
-| 13-C | `feat/guac-web-input` | 마우스/키보드 입력 → CDP `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent` | 사용자 입력을 Chromium에 주입해 양방향 제어 완성 |
-| 13-D | `feat/guac-web-delta` | 변경 영역 delta 압축 (전 프레임 비교 → 변경된 rect만 전송) | 전체 프레임 전송은 대역폭 낭비. delta로 실시간성 확보 |
-| 13-E | `test/guac-web-e2e` | 프론트엔드 ↔ GuacWebClient ↔ Chromium E2E 테스트 | 전 구간 검증 |
+| 14-A | `feat/guac-http` | GuacHttpClient (libcurl) + `response` instruction + config `web_renderer` + GuacWebSocketGateway 라우팅 | HTTP 직접 구현. Chromium 없이 웹 페이지 접근 가능. libcurl은 시스템 의존성(find_package) |
+| 14-B | `feat/guac-tunnel-route` | GuacWebSocketGateway ↔ TunnelServer 연결 — agent_id 기반 터널 경유 HTTP | Guacamole와 리버스 터널이 분리되어 있어 NAT 뒤 웹 서비스에 접근 불가. 이 작업으로 연결 |
+| 14-C | `feat/guac-http-frontend` | 프론트엔드 `response` instruction 처리 — iframe 또는 새 탭 렌더링 | 브라우저가 base64 HTML을 받아 표시하는 UI 완성 |
 
 ---
 

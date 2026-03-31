@@ -29,8 +29,9 @@ Config Config::load_from_file(const std::string& path) {
     config.agent_id_    = j.value("agent_id",    std::string("agent-1"));
 
     // 공통
-    config.verbose_  = j.value("verbose",  false);
-    config.log_file_ = j.value("log_file", std::string(""));
+    config.verbose_      = j.value("verbose",      false);
+    config.log_file_     = j.value("log_file",     std::string(""));
+    config.web_renderer_ = j.value("web_renderer", std::string("http"));
 
     return config;
 }

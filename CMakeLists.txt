@@ -23,6 +23,9 @@ find_package(OpenSSL REQUIRED)
 # ZLIB 찾기 (Phase 8-B: PNG 인코딩에 사용)
 find_package(ZLIB REQUIRED)
 
+# libcurl 찾기 (Phase 14-A: GuacHttpClient HTTP GET)
+find_package(CURL REQUIRED)
+
 # 외부 라이브러리 (FetchContent)
 include(FetchContent)
 
@@ -161,6 +164,7 @@ set(SOURCES
     src/guac_ssh.cpp
     src/guac_vnc.cpp
     src/guac_web.cpp
+    src/guac_http.cpp
     src/guac_websocket.cpp
     src/utils/config.cpp
     src/utils/logger.cpp
@@ -192,6 +196,7 @@ target_link_libraries(proxy
     ZLIB::ZLIB       # PNG 인코딩 (Phase 8-B/D)
     OpenSSL::SSL
     OpenSSL::Crypto
+    CURL::libcurl    # HTTP GET (Phase 14-A)
     pthread
     nlohmann_json::nlohmann_json
 )

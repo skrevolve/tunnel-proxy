@@ -48,10 +48,12 @@ int main(int argc, char* argv[]) {
 
         // ── GuacWebSocketGateway ─────────────────────────────────────────────
         proxy::GuacWebSocketGateway gateway;
+        gateway.set_web_renderer(config.get_web_renderer());
         gateway.start(config.get_guac_port());
         g_gateway = &gateway;
         Logger::info("Guacamole WebSocket gateway listening on port "
-                     + std::to_string(config.get_guac_port()));
+                     + std::to_string(config.get_guac_port())
+                     + " (web_renderer=" + config.get_web_renderer() + ")");
 
         // ── TunnelServer ─────────────────────────────────────────────────────
         proxy::TunnelServer tunnel_server(config.get_agent_port(),

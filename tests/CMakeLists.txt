@@ -112,6 +112,7 @@ add_executable(test_phase8
     ../src/guac_ssh.cpp
     ../src/guac_vnc.cpp
     ../src/guac_web.cpp
+    ../src/guac_http.cpp
     ../src/guac_websocket.cpp
     ../src/utils/logger.cpp
 )
@@ -135,6 +136,7 @@ target_link_libraries(test_phase8
     ZLIB::ZLIB
     OpenSSL::SSL
     OpenSSL::Crypto
+    CURL::libcurl
     pthread
     nlohmann_json::nlohmann_json
 )
@@ -163,6 +165,7 @@ gtest_discover_tests(test_phase11 PROPERTIES LABELS "phase11")
 add_executable(test_phase13
     phase13/test_guac_web.cpp
     ../src/guac_web.cpp
+    ../src/guac_http.cpp
     ../src/guac_websocket.cpp
     ../src/guac_parser.cpp
     ../src/guac_rdp.cpp
@@ -190,6 +193,7 @@ target_link_libraries(test_phase13
     ZLIB::ZLIB
     OpenSSL::SSL
     OpenSSL::Crypto
+    CURL::libcurl
     pthread
     nlohmann_json::nlohmann_json
 )

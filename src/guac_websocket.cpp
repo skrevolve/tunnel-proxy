@@ -54,10 +54,11 @@ struct WsSession {
     std::atomic<bool> active{true};
     std::mutex        send_mutex;
 
-    std::unique_ptr<GuacRdpClient> rdp;
-    std::unique_ptr<GuacSshClient> ssh;
-    std::unique_ptr<GuacVncClient> vnc;
-    std::unique_ptr<GuacWebClient> web;
+    std::unique_ptr<GuacRdpClient>  rdp;
+    std::unique_ptr<GuacSshClient>  ssh;
+    std::unique_ptr<GuacVncClient>  vnc;
+    std::unique_ptr<GuacWebClient>  web;
+    std::unique_ptr<GuacHttpClient> http;
 
     explicit WsSession(int f) : fd(f) {}
 };
@@ -191,6 +192,10 @@ GuacWebSocketGateway::GuacWebSocketGateway()
     : impl_(std::make_unique<Impl>())
 {}
 
+void GuacWebSocketGateway::set_web_renderer(const std::string& renderer) {
+    web_renderer_ = renderer;
+}
+
 GuacWebSocketGateway::~GuacWebSocketGateway() {
     stop();
 }
@@ -306,10 +311,17 @@ void GuacWebSocketGateway::handle_connection(int fd) {
     } else if (protocol == "web") {
         // connect,web,<url>[,<width>[,<height>]];
         // 예: connect,web,https://example.com,1280,800;
-        int w = std::stoi(get(2, "1280"));
-        int h = std::stoi(get(3, "800"));
-        session->web = std::make_unique<GuacWebClient>(cb);
-        session->web->connect(get(1, "about:blank"), w, h);
+        const std::string url = get(1, "about:blank");
+        if (web_renderer_ == "chromium") {
+            int w = std::stoi(get(2, "1280"));
+            int h = std::stoi(get(3, "800"));
+            session->web = std::make_unique<GuacWebClient>(cb);
+            session->web->connect(url, w, h);
+        } else {
+            // "http" (기본) — libcurl 직접 요청
+            session->http = std::make_unique<GuacHttpClient>(cb);
+            session->http->connect(url);
+        }
     } else {
         GuacInstruction err;
         err.opcode = "error";
@@ -356,10 +368,11 @@ void GuacWebSocketGateway::handle_connection(int fd) {
     }
 
     session->active = false;
-    if (session->rdp) session->rdp->disconnect();
-    if (session->ssh) session->ssh->disconnect();
-    if (session->vnc) session->vnc->disconnect();
-    if (session->web) session->web->disconnect();
+    if (session->rdp)  session->rdp->disconnect();
+    if (session->ssh)  session->ssh->disconnect();
+    if (session->vnc)  session->vnc->disconnect();
+    if (session->web)  session->web->disconnect();
+    if (session->http) session->http->disconnect();
     close(fd);
 }
 
