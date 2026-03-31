@@ -5,6 +5,7 @@
 #include "core/guac_ssh.h"
 #include "core/guac_vnc.h"
 #include "core/guac_web.h"
+#include "core/guac_http.h"
 
 #include <memory>
 #include <thread>
@@ -52,6 +53,12 @@ public:
     GuacWebSocketGateway& operator=(const GuacWebSocketGateway&) = delete;
 
     /**
+     * web 프로토콜 렌더러를 설정한다. start() 이전에 호출해야 한다.
+     * @param renderer  "http" (기본, libcurl) 또는 "chromium" (Chromium CDP 스트리밍)
+     */
+    void set_web_renderer(const std::string& renderer);
+
+    /**
      * 지정한 포트에서 WebSocket 연결 수신을 시작한다.
      * @throws std::runtime_error bind/listen 실패 시
      */
@@ -73,6 +80,7 @@ private:
     std::atomic<bool>     running_{false};
     int                   listen_fd_{-1};
     std::thread           accept_thread_;
+    std::string           web_renderer_{"http"};
 
     void accept_loop();
     void handle_connection(int fd);

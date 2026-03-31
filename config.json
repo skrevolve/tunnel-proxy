@@ -1,7 +1,8 @@
 {
-  "agent_port": 9900,
-  "proxy_port": 9901,
-  "guac_port":  8765,
-  "verbose":    true,
-  "log_file":   "proxy.log"
+  "agent_port":   9900,
+  "proxy_port":   9901,
+  "guac_port":    8765,
+  "web_renderer": "http",
+  "verbose":      true,
+  "log_file":     "proxy.log"
 }

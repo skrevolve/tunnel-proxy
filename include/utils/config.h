@@ -49,8 +49,10 @@ public:
     std::string get_agent_id()    const { return agent_id_; }
 
     // ── 공통 ──────────────────────────────────────────────────────────────────
-    bool        is_verbose()     const { return verbose_; }
-    std::string get_log_file()   const { return log_file_; }
+    bool        is_verbose()       const { return verbose_; }
+    std::string get_log_file()     const { return log_file_; }
+    /** web 프로토콜 렌더러: "http" (기본, libcurl) 또는 "chromium" (CDP 스트리밍) */
+    std::string get_web_renderer() const { return web_renderer_; }
 
 private:
     Config() = default;
@@ -66,6 +68,7 @@ private:
     std::string agent_id_    = "agent-1";
 
     // 공통
-    bool        verbose_  = false;
-    std::string log_file_ = "";
+    bool        verbose_      = false;
+    std::string log_file_     = "";
+    std::string web_renderer_ = "http";
 };

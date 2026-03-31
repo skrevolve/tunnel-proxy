@@ -72,18 +72,36 @@ Guacamole 프로토콜은 길이 접두사 텍스트 포맷이다:
 4.draw,1.0,2.10,3.100,3.200;   ← opcode.length.arg, ...
 ```
 
-### webkit headless 스트리밍 (HTTPS)
+### HTTP 웹 프록시 (web 프로토콜)
 
-Guacamole는 HTTPS 웹페이지를 지원하지 않는다.
-이를 위해 게이트웨이 서버에서 headless 브라우저(webkit/Chromium)가 페이지를 렌더링하고,
-변경된 영역(delta)만 압축해 WebSocket으로 브라우저에 스트리밍한다.
-사용자 입력은 역방향으로 headless 브라우저에 주입된다.
+Guacamole는 HTTP/HTTPS 웹페이지를 기본 지원하지 않는다.
+`web` 커스텀 프로토콜로 이를 확장한다.
+
+브라우저가 `connect,web,https://내부서버/path;`를 보내면
+게이트웨이가 해당 URL을 서버 측에서 직접 요청하고 결과를 `response` instruction으로 반환한다.
 
 ```
-브라우저 ←─ WSS (delta frame) ─→ 게이트웨이
-              ─ input event ─→    headless webkit
-                                      ↕ HTTPS
-                                  내부 웹 서비스
+브라우저
+  connect,web,https://내부서버/path;
+        ↓
+  GuacWebSocketGateway
+        ├─ web_renderer=http (기본)
+        │      → GuacHttpClient(libcurl) → HTTP GET
+        │      → response,200,text/html,<base64>;
+        └─ web_renderer=chromium (선택)
+               → GuacWebClient → Chromium headless CDP
+               → delta frame 스트리밍
+```
+
+새 Guacamole instruction:
+```
+response,200,text/html,<base64-encoded-body>;
+```
+
+`config.json`의 `web_renderer` 필드로 구현체를 선택한다:
+```json
+{ "web_renderer": "http" }      // 기본 — libcurl 직접 요청, 경량
+{ "web_renderer": "chromium" }  // JS 실행이 필요한 SPA 등
 ```
 
 ---
@@ -181,7 +199,7 @@ make -j$(nproc)
 │   ├─ ssh ──────────────────────▶ SSH 서버   │
 │   ├─ rdp ──────────────────────▶ RDP 서버   │
 │   ├─ vnc ──────────────────────▶ VNC 서버   │
-│   └─ web ──▶ Chromium headless ─▶ URL       │
+│   └─ web ──▶ GuacHttpClient ────▶ URL       │
 └─────────────────────────────────────────────┘
 ```
 
@@ -232,9 +250,10 @@ make -j$(nproc)
 ```json
 // config.json
 {
-  "agent_port": 9900,
-  "proxy_port": 9901,
-  "guac_port":  8765
+  "agent_port":   9900,
+  "proxy_port":   9901,
+  "guac_port":    8765,
+  "web_renderer": "http"   // "http"(기본) 또는 "chromium"
 }
 ```
 
@@ -302,8 +321,10 @@ cd build && ctest --output-on-failure
 | CMake | 3.14+ | 시스템 |
 | GCC | 11+ (C++17) | 시스템 |
 | OpenSSL | 3.x | 시스템 (find_package) |
+| libcurl | 7.x+ | 시스템 (find_package) |
 | nlohmann/json | v3.11.3 | FetchContent |
 | Google Test | v1.14.0 | FetchContent |
+| Chromium | 최신 stable | 선택 — `web_renderer=chromium` 사용 시 자동 탐지/설치 |
 
 ---
 
@@ -322,7 +343,8 @@ tunnel-proxy/
 │   │   ├── tunnel_server.h     # 에이전트 수신 + 세션 라우터
 │   │   ├── mtls_context.h      # mTLS SSL_CTX + CN 추출
 │   │   ├── jwt_verifier.h      # HS256/RS256 JWT 검증
-│   │   └── access_policy.h     # 접근 제어 정책 (first-match)
+│   │   ├── access_policy.h     # 접근 제어 정책 (first-match)
+│   │   └── guac_http.h         # libcurl HTTP 클라이언트 (web 프로토콜 기본 구현)
 │   └── utils/
 │       ├── config.h
 │       └── logger.h
