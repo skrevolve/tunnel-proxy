@@ -46,19 +46,23 @@ int main(int argc, char* argv[]) {
         if (config.is_verbose()) Logger::set_level(Logger::Level::DEBUG);
         Logger::set_log_file(config.get_log_file());
 
+        // ── TunnelServer ─────────────────────────────────────────────────────
+        // GuacWebSocketGateway보다 먼저 생성해야 한다.
+        // gateway.set_tunnel_server()에 포인터를 넘기므로
+        // tunnel_server가 gateway보다 오래 살아야 한다 (같은 스코프에서 스택 역순 소멸).
+        proxy::TunnelServer tunnel_server(config.get_agent_port(),
+                                          config.get_proxy_port());
+        g_tunnel_srv = &tunnel_server;
+
         // ── GuacWebSocketGateway ─────────────────────────────────────────────
         proxy::GuacWebSocketGateway gateway;
         gateway.set_web_renderer(config.get_web_renderer());
+        gateway.set_tunnel_server(&tunnel_server);
         gateway.start(config.get_guac_port());
         g_gateway = &gateway;
         Logger::info("Guacamole WebSocket gateway listening on port "
                      + std::to_string(config.get_guac_port())
                      + " (web_renderer=" + config.get_web_renderer() + ")");
-
-        // ── TunnelServer ─────────────────────────────────────────────────────
-        proxy::TunnelServer tunnel_server(config.get_agent_port(),
-                                          config.get_proxy_port());
-        g_tunnel_srv = &tunnel_server;
         Logger::info("TunnelServer: agent_port=" + std::to_string(config.get_agent_port())
                      + ", proxy_port=" + std::to_string(config.get_proxy_port()));
 

@@ -123,6 +123,30 @@ public:
      */
     bool set_session_external_fd(uint32_t session_id, int external_fd);
 
+    /**
+     * Guacamole 게이트웨이용 — 터널을 통해 내부 서버에 연결된 소켓 fd를 반환한다.
+     *
+     * 동작:
+     *   1. socketpair(AF_UNIX, SOCK_STREAM) 생성 — fds[0](서버 측), fds[1](호출자 측)
+     *   2. open_session() → OPEN 프레임 전송
+     *   3. OPEN_ACK 대기 (최대 OPEN_ACK_TIMEOUT_S 초)
+     *   4. fds[0]를 session external_fd로 등록
+     *   5. 중계 스레드 시작: fds[0] 읽기 → DATA 프레임 → 에이전트 전송
+     *   6. fds[1] 반환 — 호출자가 HTTP 요청을 read/write하는 fd
+     *
+     * 데이터 흐름:
+     *   curl (fds[1]) ──write──▶ fds[0] ──recv──▶ 중계 스레드 ──DATA──▶ 에이전트 ──▶ 내부 서버
+     *   curl (fds[1]) ◀──read── fds[0] ◀──send── handle_agent_frame(DATA) ◀──DATA── 에이전트
+     *
+     * @param agent_id    터널 에이전트 ID
+     * @param target_ip   에이전트가 연결할 내부 서버 IP
+     * @param target_port 에이전트가 연결할 내부 서버 포트
+     * @return 호출자가 소유하는 소켓 fd. 실패 시 -1.
+     */
+    int connect_via_tunnel(const std::string& agent_id,
+                           const std::string& target_ip,
+                           uint16_t target_port);
+
     // ── 상태 조회 ─────────────────────────────────────────────────────────────
 
     uint32_t get_agent_count() const;
