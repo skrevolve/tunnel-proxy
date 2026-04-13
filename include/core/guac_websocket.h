@@ -6,6 +6,7 @@
 #include "core/guac_vnc.h"
 #include "core/guac_web.h"
 #include "core/guac_http.h"
+#include "core/tunnel_server.h"
 
 #include <memory>
 #include <thread>
@@ -59,6 +60,16 @@ public:
     void set_web_renderer(const std::string& renderer);
 
     /**
+     * 리버스 터널 서버를 연결한다. start() 이전에 호출해야 한다.
+     *
+     * 설정 시 `connect,web,<url>,<agent_id>` 형식으로 터널 경유 HTTP 요청이 가능해진다.
+     * nullptr이면 터널 경유 요청을 거부하고 직접 연결만 허용한다.
+     *
+     * @param ts  TunnelServer 포인터 (소유권 없음 — proxy보다 오래 살아야 함)
+     */
+    void set_tunnel_server(TunnelServer* ts);
+
+    /**
      * 지정한 포트에서 WebSocket 연결 수신을 시작한다.
      * @throws std::runtime_error bind/listen 실패 시
      */
@@ -81,6 +92,7 @@ private:
     int                   listen_fd_{-1};
     std::thread           accept_thread_;
     std::string           web_renderer_{"http"};
+    TunnelServer*         tunnel_server_{nullptr};
 
     void accept_loop();
     void handle_connection(int fd);

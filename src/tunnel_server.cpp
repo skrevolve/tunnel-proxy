@@ -7,6 +7,7 @@
 #include <chrono>
 
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <thread>
@@ -551,6 +552,97 @@ void TunnelServer::watchdog_loop() {
         }
     }
     Logger::info("[server] watchdog thread exited");
+}
+
+// ── Phase 14-B: Guacamole 게이트웨이 직접 터널 연결 ────────────────────────
+
+int TunnelServer::connect_via_tunnel(const std::string& agent_id,
+                                     const std::string& target_ip,
+                                     uint16_t target_port) {
+    // socketpair: fds[0] = 서버 측 (external_fd), fds[1] = 호출자 측 (curl용)
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+        Logger::error("[server] connect_via_tunnel socketpair failed: " +
+                      std::string(strerror(errno)));
+        return -1;
+    }
+
+    // OPEN_ACK 대기 설정
+    std::promise<void> ack_promise;
+    auto ack_future = ack_promise.get_future();
+
+    uint32_t session_id = open_session(agent_id, target_ip, target_port);
+    if (session_id == 0) {
+        Logger::error("[server] connect_via_tunnel: open_session failed for agent=" + agent_id);
+        close(fds[0]); close(fds[1]);
+        return -1;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pending_open_mutex_);
+        pending_open_[session_id] = std::move(ack_promise);
+    }
+
+    // OPEN_ACK 대기 (에이전트가 내부 서버에 연결할 때까지)
+    auto status = ack_future.wait_for(std::chrono::seconds(OPEN_ACK_TIMEOUT_S));
+    if (status != std::future_status::ready) {
+        Logger::error("[server] connect_via_tunnel: OPEN_ACK timeout, session=" +
+                      std::to_string(session_id));
+        {
+            std::lock_guard<std::mutex> lock(pending_open_mutex_);
+            pending_open_.erase(session_id);
+        }
+        close_session(session_id);
+        close(fds[0]); close(fds[1]);
+        return -1;
+    }
+
+    try { ack_future.get(); } catch (...) {
+        close_session(session_id);
+        close(fds[0]); close(fds[1]);
+        return -1;
+    }
+
+    // fds[0]를 세션 external_fd로 등록
+    // handle_agent_frame(DATA)가 send(fds[0], ...) 호출 → fds[1]에서 읽힘 (curl 수신 방향)
+    if (!set_session_external_fd(session_id, fds[0])) {
+        Logger::error("[server] connect_via_tunnel: session gone, session=" +
+                      std::to_string(session_id));
+        close(fds[0]); close(fds[1]);
+        return -1;
+    }
+
+    // 중계 스레드: fds[0]에서 읽기 (curl이 fds[1]에 쓴 HTTP 요청)
+    //             → DATA 프레임으로 에이전트에 전송 (curl→내부서버 방향)
+    std::thread([this, session_id, agent_id, relay_fd = fds[0]]() {
+        constexpr size_t BUF_SIZE = 4096;
+        uint8_t buf[BUF_SIZE];
+
+        while (running_) {
+            ssize_t n = recv(relay_fd, buf, BUF_SIZE, 0);
+            if (n <= 0) break;
+
+            std::vector<uint8_t> data(buf, buf + static_cast<size_t>(n));
+            try {
+                send_to_agent(agent_id, make_data(session_id, std::move(data)));
+            } catch (...) {
+                break;
+            }
+        }
+
+        // 정리: CLOSE 전송 + 세션/fd 해제
+        try { send_to_agent(agent_id, make_close(session_id)); } catch (...) {}
+        close_session(session_id);
+        close(relay_fd);
+        Logger::info("[server] tunnel relay closed, session=" +
+                     std::to_string(session_id));
+    }).detach();
+
+    Logger::info("[server] connect_via_tunnel established: session=" +
+                 std::to_string(session_id) + " agent=" + agent_id +
+                 " target=" + target_ip + ":" + std::to_string(target_port));
+
+    return fds[1];  // 호출자(curl)가 사용하는 fd
 }
 
 // ── Phase 6-D: 외부 클라이언트 포워딩 ──────────────────────────────────────

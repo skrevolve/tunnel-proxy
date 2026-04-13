@@ -196,6 +196,36 @@ void GuacWebSocketGateway::set_web_renderer(const std::string& renderer) {
     web_renderer_ = renderer;
 }
 
+void GuacWebSocketGateway::set_tunnel_server(TunnelServer* ts) {
+    tunnel_server_ = ts;
+}
+
+// URL에서 host와 port를 추출한다.
+// "http://host:8080/path" → ("host", 8080)
+// "https://host/path"    → ("host", 443)
+static std::pair<std::string, uint16_t> parse_url_host_port(const std::string& url) {
+    bool is_https = url.size() >= 5 && url.substr(0, 5) == "https";
+    uint16_t default_port = is_https ? 443 : 80;
+
+    size_t scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) return {"", default_port};
+
+    size_t host_start = scheme_end + 3;
+    size_t path_start = url.find('/', host_start);
+    std::string host_port = (path_start != std::string::npos)
+        ? url.substr(host_start, path_start - host_start)
+        : url.substr(host_start);
+
+    size_t colon = host_port.find(':');
+    if (colon != std::string::npos) {
+        try {
+            int port = std::stoi(host_port.substr(colon + 1));
+            return {host_port.substr(0, colon), static_cast<uint16_t>(port)};
+        } catch (...) {}
+    }
+    return {host_port, default_port};
+}
+
 GuacWebSocketGateway::~GuacWebSocketGateway() {
     stop();
 }
@@ -309,18 +339,61 @@ void GuacWebSocketGateway::handle_connection(int fd) {
         session->rdp = std::make_unique<GuacRdpClient>(cb);
         session->rdp->connect(get(1, "localhost"), port, get(3, ""), get(4, ""));
     } else if (protocol == "web") {
-        // connect,web,<url>[,<width>[,<height>]];
-        // 예: connect,web,https://example.com,1280,800;
-        const std::string url = get(1, "about:blank");
-        if (web_renderer_ == "chromium") {
-            int w = std::stoi(get(2, "1280"));
+        // 형식 A (직접):  connect,web,<url>;
+        // 형식 B (터널):  connect,web,<url>,<agent_id>;
+        // 형식 C (CDP):   connect,web,<url>,<width>,<height>;  (web_renderer=chromium)
+        const std::string url      = get(1, "about:blank");
+        const std::string arg2     = get(2, "");
+
+        // web_renderer=chromium 이면서 arg2가 숫자(너비)인 경우 → Chromium 스트리밍
+        bool is_chromium = (web_renderer_ == "chromium");
+
+        if (is_chromium) {
+            int w = arg2.empty() ? 1280 : std::stoi(arg2);
             int h = std::stoi(get(3, "800"));
             session->web = std::make_unique<GuacWebClient>(cb);
             session->web->connect(url, w, h);
         } else {
-            // "http" (기본) — libcurl 직접 요청
+            // web_renderer=http — 직접 또는 터널 경유
+            const std::string agent_id = arg2;  // 비어있으면 직접 연결
+
             session->http = std::make_unique<GuacHttpClient>(cb);
-            session->http->connect(url);
+
+            if (!agent_id.empty() && tunnel_server_) {
+                // 터널 경유 HTTP: connect_via_tunnel 호출 → pre_fd로 curl
+                // connect_via_tunnel은 OPEN_ACK 대기로 블로킹 → 워커 스레드에서 실행
+                auto session_ref = session;  // shared_ptr 복사 — 세션 생존 보장
+                std::thread([this, session_ref, url, agent_id]() {
+                    auto [host, port] = parse_url_host_port(url);
+                    if (host.empty()) {
+                        GuacInstruction err;
+                        err.opcode = "error";
+                        err.args   = {"Invalid URL for tunnel routing: " + url, "400"};
+                        std::lock_guard<std::mutex> lock(session_ref->send_mutex);
+                        send_ws_frame(session_ref->fd, GuacParser::serialize(err));
+                        return;
+                    }
+
+                    int pre_fd = tunnel_server_->connect_via_tunnel(agent_id, host, port);
+                    if (pre_fd < 0) {
+                        GuacInstruction err;
+                        err.opcode = "error";
+                        err.args   = {"Tunnel connect failed: agent=" + agent_id, "502"};
+                        std::lock_guard<std::mutex> lock(session_ref->send_mutex);
+                        send_ws_frame(session_ref->fd, GuacParser::serialize(err));
+                        return;
+                    }
+
+                    if (session_ref->http && session_ref->active.load()) {
+                        session_ref->http->connect(pre_fd, url);
+                    } else {
+                        close(pre_fd);
+                    }
+                }).detach();
+            } else {
+                // 직접 HTTP GET
+                session->http->connect(url);
+            }
         }
     } else {
         GuacInstruction err;

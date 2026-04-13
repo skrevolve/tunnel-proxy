@@ -114,6 +114,9 @@ add_executable(test_phase8
     ../src/guac_web.cpp
     ../src/guac_http.cpp
     ../src/guac_websocket.cpp
+    ../src/tunnel_server.cpp
+    ../src/tunnel_protocol.cpp
+    ../src/tunnel_metrics.cpp
     ../src/utils/logger.cpp
 )
 target_include_directories(test_phase8 SYSTEM PRIVATE
@@ -171,6 +174,9 @@ add_executable(test_phase13
     ../src/guac_rdp.cpp
     ../src/guac_ssh.cpp
     ../src/guac_vnc.cpp
+    ../src/tunnel_server.cpp
+    ../src/tunnel_protocol.cpp
+    ../src/tunnel_metrics.cpp
     ../src/utils/logger.cpp
 )
 target_include_directories(test_phase13 SYSTEM PRIVATE

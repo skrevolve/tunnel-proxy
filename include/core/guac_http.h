@@ -57,7 +57,7 @@ public:
     GuacHttpClient& operator=(const GuacHttpClient&) = delete;
 
     /**
-     * 지정한 URL을 HTTP GET으로 요청한다.
+     * 지정한 URL을 HTTP GET으로 요청한다. (직접 연결)
      *
      * 비동기 — worker_ 스레드에서 요청을 처리한다.
      * 요청 완료 시 response instruction을 콜백으로 전달하고 is_connected()가 false로 전환된다.
@@ -65,6 +65,21 @@ public:
      * @param url  요청할 URL (예: "https://example.com")
      */
     void connect(const std::string& url);
+
+    /**
+     * 터널로 미리 연결된 소켓 fd를 통해 HTTP GET을 요청한다. (터널 경유)
+     *
+     * TunnelServer::connect_via_tunnel()이 반환한 fd를 사용한다.
+     * libcurl의 CURLOPT_OPENSOCKETFUNCTION으로 fd를 주입해 connect()를 건너뛴다.
+     * fd의 소유권은 libcurl에 이전되며 요청 완료 후 close()된다.
+     *
+     * HTTPS URL의 경우 SSL 핸드셰이크는 내부 서버(터널 반대편)와 수행한다.
+     * 리다이렉트는 같은 터널 fd를 공유할 수 없으므로 비활성화된다.
+     *
+     * @param pre_fd  TunnelServer::connect_via_tunnel()이 반환한 소켓 fd
+     * @param url     요청할 URL (예: "http://192.168.0.10/api/status")
+     */
+    void connect(int pre_fd, const std::string& url);
 
     /**
      * 진행 중인 요청을 중단하고 worker_ 스레드 종료를 대기한다.
@@ -98,6 +113,7 @@ private:
      * @param url  요청할 URL
      */
     void run_request(const std::string& url);
+    void run_request_fd(int pre_fd, const std::string& url);
 };
 
 } // namespace proxy
